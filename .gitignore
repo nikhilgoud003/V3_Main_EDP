@@ -1,0 +1,35 @@
+# run outputs and test folders
+out*/
+run*/
+tests*/
+consolidated*/
+superseded*/
+try_*/
+analysis*/
+all_inputs/
+*.jsonl
+*.log
+state.json
+consolidation_state.json
+score*.json
+timings.txt
+consolidate_timings.txt
+
+# case files (PACER JSON) and other inputs
+*.json
+*.zip
+json/
+cases/
+txsd*/
+pilot*/
+
+# answer key (not public)
+answer_key*/
+eval_pilot*/
+
+# environments / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store

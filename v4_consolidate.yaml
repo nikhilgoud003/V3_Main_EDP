@@ -1,0 +1,87 @@
+# Layer B (v4_consolidate.py) settings. Every number has a source note.
+# No person, agency or court names here.
+
+reference:
+  source: user (Layer B request) - the label sources; read only
+  answer_key_dir: ""   # answer key folder (answer_key_detail.csv + work/sample200.txt, used by score.py); not in the repo.
+                       # Give it with --key or the V4_ANSWER_KEY environment variable; without it training uses FJC + fragments only
+  fjc_list: data/judges_fjc.csv                       # relative to this file; FJC Biographical Directory export
+  layer_a_rules: v4_rules.yaml                        # read only: Layer A's placeholder rule (doe_pattern, placeholder_party);
+                                                      # placeholder party IDs are never consolidated, as in Layer A
+
+names:
+  source: generic name parsing (same suffix set as score.py surname()). A party ID counts as a person when Layer A did
+    not mark it an organisation and its first word is in the US Census Bureau 1990 first-name files (the same public
+    files Layer A uses, www2.census.gov/topics/genealogy/1990surnames)
+  suffixes: [jr, sr, ii, iii, iv]
+  male_first: data/census1990_dist.male.first.txt
+  female_first: data/census1990_dist.female.first.txt
+
+case_numbers:
+  source: PACER case number format "<division>:<yy>-<type>-<number>"; two-digit years below the pivot are 20yy
+  year_pivot: 70
+
+tfidf:
+  source: user (Layer B request) - character n-gram TF-IDF, fitted on the training run's names and saved in the model
+  analyzer: char_wb
+  ngram_min: 2
+  ngram_max: 4
+
+candidates:
+  source: user (Layer B request) - speed filter only. The cut is data-derived at training time - this quantile of the
+    name cosine over labelled same-court positive pairs - and is stored in the model and model_card.md
+  positive_quantile: 0.02
+  chunk_rows: 1000      # rows per block when computing cosines (memory only, no effect on results)
+
+fragments:
+  source: user (Layer B request, label source c) - automatic fragments of confident full names. The counts below are
+    sampling sizes only (training-set size), chosen so training takes minutes on the pilot
+  seed: 13
+  max_sources_per_type: 1500
+  per_source: 2
+  # positives: first_only, initial_surname, with_title (surname only + the source's titles: Layer A cuts titles out of
+  # names), first_words (drop the last word of a 3+ word name). Negative: other_generation (the same name with a
+  # different generation suffix, in the same cases; only for names that carry a suffix)
+  kinds: [first_only, initial_surname, with_title, first_words, other_generation]
+  cases_in: [0, 3]     # how many of the source's cases the fragment is placed in (random in range)
+  cases_out: [0, 2]    # how many other cases of the same division (judges only; at least 1 case in total)
+
+model:
+  source: user (Layer B request) - LogisticRegression and HistGradientBoosting, calibrated, court group k-fold
+  outer_folds: 5
+  inner_folds: 3
+  calibration: isotonic
+  lr_C: 1.0
+  hgb_max_iter: 300
+  hgb_learning_rate: 0.05
+  hgb_max_leaf_nodes: 31
+  hgb_l2: 1.0
+  random_state: 0
+  pick_by: average_precision   # the model with the higher held-out average precision is kept
+
+thresholds:
+  source: user (Layer B request) - T_high gives >= 0.98 precision on held-out folds, checked separately for each label
+    source with enough support (the highest such threshold wins). T_low keeps this share of held-out true pairs at or
+    above it, so at most (1 - low_recall) of true pairs are kept apart without review
+  precision_target: 0.98
+  min_support: 20
+  low_recall: 0.95
+
+report:
+  source: user (Layer B request) - 50 random merges per non-judge type
+  sample_per_type: 50
+  seed: 0
+
+llm:
+  source: user (Layer B request) - off by default; precision measured on held-out labelled pilot pairs first
+  local_model: "qwen2.5:7b"          # fits a 16 GB Mac (4.7 GB); any Ollama model can be set here
+  local_url: "http://127.0.0.1:11434"
+  api_url: "https://api.anthropic.com/v1/messages"
+  api_model: "claude-haiku-5-5"
+  api_key_env: ANTHROPIC_API_KEY     # read from the environment only, never written anywhere
+  n_eval_pairs: 200
+  min_precision: 0.95
+  max_snippets: 5
+  snippet_chars: 300
+  max_pairs: 300                     # review pairs sent per run, highest score first (time cap)
+  timeout_s: 120

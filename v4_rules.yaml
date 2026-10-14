@@ -1,0 +1,414 @@
+# v4_rules.yaml: every word list, pattern and threshold used by v4_run_ctx.py.
+# Each entry has a `source:` note. Sources:
+#   notebook   = the Colab notebook "V4 (1).ipynb" (cells 5-8), copied unchanged
+#   user       = an explicit instruction from the user (date / step noted)
+#   data       = chosen from what the pilot / TXSD outputs showed (file noted)
+#   choice     = my default, with the reason
+#   reference  = public reference data file (path noted)
+# Regexes are Python `re` syntax and are written as literal blocks (no YAML escaping).
+
+matching_label: "context-aware v10 (docket pending pool, trailing-word trim)"   # written to state.json; source: choice (version tag)
+
+entity_types:
+  source: notebook (EXTRACTION_CONFIG, cell 5); json_paths are documentation only, extraction code walks the same fields
+  judge:   {json_paths: [judge, referred_judges, "parties[].judge", "parties[].referred_judges"], docket_scan: true, id_prefix: SJ, id_key: sjid}
+  party:   {json_paths: ["parties[].name"], docket_scan: false, id_prefix: SP, id_key: spid}
+  counsel: {json_paths: ["parties[].counsel[].name"], skip_pro_se: true, docket_scan: false, id_prefix: SC, id_key: scid}
+  firm:    {json_paths: ["parties[].counsel[].entity_info.office_name"], skip_pro_se: true, docket_scan: false, id_prefix: SF, id_key: sfid}
+
+# ---------------------------------------------------------------- extraction
+docket_judge_patterns:
+  source: 'notebook (DOCKET_JUDGE_PATTERNS, cell 5) for the first two; the last three are general phrases added in step 6 (user -
+    "before ... Judge X", "referred to Magistrate Judge X", "signed/ordered by Judge X"). V3 configs/judges.yaml was read: it finds
+    docket judges with spaCy NER and uses regexes only to reject non-judges (probation officers, court reporters, clerks), which the
+    non_judge_docket_keywords and judges.non_name_words lists cover here.'
+  patterns:
+    - |-
+      (?:held before|before Judge|before Magistrate Judge|before)\s+(?:Judge|Magistrate Judge|District Judge|Senior Judge|Honorable)?\s*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:\s*(?:Jr\.|Sr\.|III|II))?)
+    - |-
+      (?:Signed by|ORDER.*Signed by)\s+(?:Judge|Magistrate Judge|District Judge|Senior Judge|Honorable)?\s*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:\s*(?:Jr\.|Sr\.|III|II))?)
+    - |-
+      \bbefore\s+(?:the\s+)?(?:Honorable\s+|Hon\.?\s+)?(?:Chief\s+|Senior\s+)?(?:United\s+States\s+|U\.\s?S\.\s?)?(?:District\s+|Magistrate\s+|Bankruptcy\s+)?Judge\s+((?:[A-Z][a-z'\-]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z'\-]+|[A-Z]\.)){0,3})
+    - |-
+      \breferred\s+to\s+(?:the\s+)?(?:Honorable\s+|Hon\.?\s+)?(?:United\s+States\s+|U\.\s?S\.\s?)?Magistrate\s+Judge\s+((?:[A-Z][a-z'\-]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z'\-]+|[A-Z]\.)){0,3})
+    - |-
+      \b(?:[Ss]igned|[Oo]rdered|[Ee]ntered)\s+by\s+(?:the\s+)?(?:Honorable\s+|Hon\.?\s+)?(?:Chief\s+|Senior\s+)?(?:United\s+States\s+|U\.\s?S\.\s?)?(?:District\s+|Magistrate\s+|Bankruptcy\s+)?Judge\s+((?:[A-Z][a-z'\-]+|[A-Z]\.)(?:\s+(?:[A-Z][a-z'\-]+|[A-Z]\.)){0,3})
+
+non_judge_docket_keywords:
+  source: notebook (NON_JUDGE_DOCKET_KEYWORDS, cell 5); substring test on the lower-cased docket candidate
+  words: ["court staff", "courtroom", "clerk", "chambers staff", "reporter", "recorder", "usa", "fpd"]
+
+# ---------------------------------------------------------------- normalization
+title_words:
+  source: notebook (TITLE_PATTERN, cell 7); removed from every name before punctuation is stripped
+  words: [honorable, judge, magistrate, district, senior, presiding, chief, "court staff", "pro se"]
+
+apostrophes:
+  source: notebook (clean_text_base, cell 7)
+  pattern: |-
+    ['’]
+
+corp_suffix_words:
+  source: notebook (CORP_SUFFIX_PATTERN, cell 7); removed from firm and party names for comparison
+  words: [inc, incorporated, corp, corporation, llc, llp, ltd, limited, co, company, the, pc, apc, pllc, pa]
+
+judge_title_words:
+  source: user (judge titles step); removed from judge names only, after punctuation became spaces
+  words: [hon, "u s d j", "u s m j", usdj, usmj, "magistrate judge", "chief judge", "senior judge"]
+
+doe_pattern:
+  source: notebook (DOE_PATTERN, cell 7)
+  pattern: |-
+    ^(john\s+doe|jane\s+doe|does?(\s+\d+.*)?|unknown\s+parties?|unnamed.*)$
+
+name_suffixes:
+  source: choice (standard generational suffixes); ignored when taking the surname, and a conflict blocks a merge
+  words: [jr, sr, ii, iii, iv, v]
+
+# ---------------------------------------------------------------- contact evidence
+contact:
+  source: choice (US phone numbers are 10 digits; a leading 1 is the country code; street number + ZIP is the
+    same address evidence the answer key uses)
+  phone_min_digits: 7
+  phone_country_code: "1"
+  zip_pattern: |-
+    \b(\d{5})(?:-\d{4})?\b
+  street_number_pattern: |-
+    \b(\d+)\b
+
+webmail_domains:
+  source: choice (common US webmail providers; a shared webmail domain is not firm evidence, same rule as the answer key)
+  domains: [gmail.com, yahoo.com, aol.com, hotmail.com, outlook.com, msn.com, comcast.net, icloud.com, me.com, live.com,
+            att.net, sbcglobal.net, verizon.net, bellsouth.net, earthlink.net, mail.com, protonmail.com, ymail.com,
+            cox.net, charter.net]
+
+# ---------------------------------------------------------------- people
+nickname_groups:
+  source: choice (typed list of common English given-name / nickname pairs; no public list was found locally)
+  groups:
+    - william bill billy will willie
+    - robert bob bobby rob robbie
+    - james jim jimmy jamie
+    - michael mike mikey
+    - richard dick rick ricky rich
+    - thomas tom tommy
+    - joseph joe joey
+    - daniel dan danny
+    - david dave davey
+    - charles chuck charlie chas
+    - edward ed eddie ted ned
+    - kenneth ken kenny
+    - lawrence larry
+    - patrick pat
+    - patricia pat patty trish
+    - susan sue susie
+    - katherine kathryn catherine kate kathy katie cathy
+    - elizabeth liz beth betsy betty lisa
+    - margaret peggy maggie meg
+    - anthony tony
+    - andrew andy drew
+    - stephen steven steve
+    - christopher chris
+    - christine chris christina
+    - matthew matt
+    - nicholas nick
+    - ronald ron ronnie
+    - donald don donnie
+    - gregory greg
+    - gerald jerry
+    - jerome jerry
+    - henry hank harry
+    - john jack johnny jon
+    - jonathan jon
+    - samuel sam sammy
+    - benjamin ben benny
+    - albert al bert
+    - alan al
+    - frederick fred freddie
+    - francis frank
+    - franklin frank
+    - harold harry hal
+    - jeffrey jeff
+    - timothy tim
+    - peter pete
+    - philip phillip phil
+    - raymond ray
+    - walter walt wally
+    - douglas doug
+    - jennifer jen jenny
+    - cynthia cindy
+    - rebecca becky
+    - deborah debra deb debbie
+    - victoria vicky tori
+    - sandra sandy
+    - terrence terence terry
+    - theresa teresa terry tess
+    - alexander alex
+    - alexandra alex
+    - nathaniel nate nat
+    - nathan nate
+    - zachary zach zack
+    - gary garry
+    - leonard len lenny
+    - louis lou
+    - eugene gene
+    - vincent vince
+    - mitchell mitch
+    - randall randy
+    - rodney rod
+    - russell russ
+    - abraham abe
+    - pamela pam
+    - barbara barb
+    - dorothy dot dottie
+    - judith judy
+    - jacqueline jackie
+    - melissa missy
+
+counsel_tag_tokens:
+  source: 'user (counsel step - strip trailing tags like "-DOJ", "(USAO)"); tokens seen as trailing tags in the pilot'
+  words: [doj, usao, ausa, sausa, fpd, cja, usa, crm, civ, tax, enrd, atr, oag]
+
+# ---------------------------------------------------------------- parties
+government_party_names:
+  source: user (fix 1, ctx2 step). NOTE - this names one specific entity (the federal government as a party); kept
+    because the user asked for it explicitly, flagged against the "no specific entity" rule.
+  names: ["united states of america", "united states", "usa", "us", "u s a", "u s", "united states america"]
+  not_if_contains: "ex rel"
+
+org_party_words:
+  source: 'user (fix 2, ctx2 step - legal forms, government / agency words); word list is my choice; "lloyds" added in step 4
+    (data - two insurers named "... Lloyds" were in the TXSD top-30 person-rule names, step3_titles.json)'
+  words: [inc, incorporated, corp, corporation, llc, llp, lp, ltd, limited, co, company, plc, pc, pllc, pa, na, ag, sa,
+          department, dept, agency, administration, bureau, commission, commissioner, board, authority, office, service,
+          services, government, commonwealth, county, city, state, village, town, township, municipality, police, sheriff,
+          district, school, university, college, hospital, bank, insurance, trust, fund, association, assn, group,
+          industries, products, systems, international, holdings, partners, center, foundation, union, council, society,
+          institute, enterprises, technologies, manufacturing, motors, airlines, railroad, railway, energy,
+          pharmaceuticals, laboratories, lloyds]
+  of_words:
+    source: user (fix 2 - "State of", "County of", "City of")
+    words: [state, county, city]
+
+placeholder_party:
+  source: 'user (fix 2 - placeholders - Unknown, Defendant(s), et al, Doe)'
+  words: [doe, does, unknown, unnamed, "et al"]
+  exact_names: [defendant, defendants, "defendant s", plaintiff, plaintiffs, "plaintiff s"]
+
+party_evidence:
+  source: choice (ctx step); RARE_* and COPARTY_* are thresholds I picked, see REPORT_ctx.md
+  rare_max_cases: 3
+  rare_person_min_tokens: 3
+  coparty_max_cases: 10
+  coparty_max_parties_in_case: 200
+
+# ---------------------------------------------------------------- firms
+federal_offices:
+  source: user (ctx step - "U.S. Attorney / Federal Public Defender kept per district, whole words"). NOTE - these name
+    two specific office types; kept because the user asked for them explicitly, flagged against the "no specific
+    entity" rule.
+  usao_pattern: |-
+    \b(?:united states|u s|us)\s+attorneys?\b|\busao\b
+  fpd_pattern: |-
+    \bfederal\s+(?:public\s+|community\s+)?defenders?\b|\bfpd\b
+
+# ---------------------------------------------------------------- judges (step 2)
+judges:
+  strip_parenthetical:
+    source: 'data (out_ctx_txsd judge audit - "Magistrate Judge <name> (Settlement)"); bracketed text is not part of a judge name'
+    pattern: |-
+      \([^)]*\)
+  title_typos:
+    source: 'data (out_ctx_txsd same-surname audit - "Jude <surname>", "Judgte <surname>", "Juge <surname>", "Judges <surname>"); removed like titles'
+    words: [jude, judges, judgte, juge, jduge, judgee, magistrat]
+  non_name_words:
+    source: 'data (out_ctx_txsd judge audit, txsd_ctx_checks.json - "Judge Unassigned", "Jury Selection", "Docket Call", "Final Pretrial",
+      "Minute Entry", "Status Conference", "X Court", "X Appearances") plus common docket event words. A judge entry with any of these
+      words is dropped. Words that are also common surnames (bond, call, case, hearn, ...) are deliberately left out.'
+    words: [unassigned, jury, selection, docket, pretrial, conference, minute, minutes, entry, status, court, courts, appearances,
+            appearance, settlement, hearing, final, duty, immigration, trial, term, voir, dire, courtesy, reminder, motion, motions,
+            order, orders, sealed, clerk, deputy, reporter, recorder, courtroom, staff, interpreter, probation, none, unknown,
+            this, calendar, arraignment, sentencing, detention, plea, mediation, deadline, deadlines, scheduling, proceedings,
+            transcript, ero, filed, signed, referred, assigned, reassigned, magistrates, chambers, defendant, plaintiff, counsel,
+            government, notice, set, reset, regarding]
+  title_evidence:
+    source: 'user (step 2 - keep the title Magistrate / District / Bankruptcy as evidence); U.S.M.J. / U.S.D.J. are the standard abbreviations'
+    titles:
+      magistrate: [magistrate, "u s m j", usmj]
+      district: [district, "u s d j", usdj]
+      bankruptcy: [bankruptcy]
+  typo:
+    source: 'user (step 2 - same court + same surname + first name 1 edit apart, unless both spellings have 20+ mentions).
+      "1 edit" uses optimal string alignment distance, so a swapped letter pair (Kieth / Keith) is one edit.
+      min_first_name_length is my choice so initials never count as typos.'
+    max_first_name_edits: 1
+    min_first_name_length: 3
+    both_frequent_min_mentions: 20
+  surname_only:
+    source: 'user (step 2 - same case, then same division (number before ":" in the case ID), then same court; else one unresolved record per surname per court)'
+    levels: [case, division, court]
+    unresolved_id_prefix: SJU
+
+# ---------------------------------------------------------------- organisations / agencies (step 4)
+organisations:
+  abbreviations:
+    source: 'user (step 4 - normalise abbreviations Dept, Dep''t, &, punctuation); expansions are standard US abbreviations (my list)'
+    map: {dept: department, depts: departments, dpt: department, govt: government, assn: association, natl: national,
+          intl: international, univ: university, admin: administration, cnty: county, hosp: hospital, ctr: center,
+          svcs: services, svc: service, mgmt: management, mfg: manufacturing, bros: brothers, corr: correctional}
+    drop_words: [and]
+  collapse_single_letters:
+    source: 'user (step 4 - punctuation; revised) - runs of single letters are joined ONLY when they spell a legal form
+      ("L.L.C." -> "llc"); "A. W." and "B. F." stay as they are'
+    enabled: true
+  legal_forms:
+    source: 'notebook corp_suffix_words + plc, lp, llp, na, sa, ag (common legal forms); a suffix made only of these is never a
+      division (step 4 revision a)'
+    extra_words: [plc, lp, llp, na, sa, ag]
+  acronym:
+    source: 'user (step 4, revised) - an all-caps token is an organisation acronym ONLY if it equals the initials of an organisation
+      name in the same court (initials ignore initials_skip_words) or carries a division suffix such as "-CID"; otherwise it stays
+      under the person rule. Initials are collected per court over saved data + the whole input batch before matching, so both
+      arrival orders give the same result within a run. Lengths are my choice.'
+    min_length: 3
+    max_length: 8
+    initials_skip_words: [of, the, and, for, on, in, at, to, a, an]
+  division:
+    source: 'user (step 4 - division suffixes kept as aliases of the parent; revised). A suffix after " - ", "-", "," or "/" counts
+      as a division when it contains one of these words, or when it is a single all-caps token that is the acronym of an
+      organisation or division name in the same court (e.g. "-CID" where a "... Correctional Institutions Division" name appears). A suffix
+      made only of legal-form words is never a division.'
+    separator_pattern: |-
+      \s*[-–—/,]\s*
+    words: [division, divisions, unit, section, branch, bureau, office, program, facility, institution, institutions,
+            region, regional, center, unit, department]
+    acronym_max_length: 6
+
+# ---------------------------------------------------------------- lawyers (step 5)
+counsel:
+  pro_se:
+    source: 'data (TXSD) - the JSON flag parties[].counsel[].is_pro_se marks pro se entries (9,646 in TXSD) and they get no counsel
+      or firm mention. Text "pro se" without the flag (11 entries) and counsel named like their own party (101) were checked: they
+      are lawyers (e.g. attorneys who are parties), so no extra text rule is added.'
+    rule: is_pro_se flag
+  no_contact:
+    source: 'user (step 5) - counsel with no email / phone / address / office: same full name including a middle initial in the same
+      court, or the same name representing the same party ID -> one ID. "Same name" = same first and last name, middle names not
+      conflicting (my reading). full_name_min_tokens = first + middle + last.'
+    full_name_min_tokens: 3
+
+# ---------------------------------------------------------------- docket-text judges (clean-up job)
+docket_judges:
+  rule:
+    source: 'user (clean-up fix 1) - a docket mention first joins a known judge. If it matches none, it goes to the pending pool
+      (pending_judges.jsonl in the output folder), never dropped. A pending name becomes a judge ID only when it has a first AND
+      last name, carries a judge title in the docket phrase, and appears in min_cases different cases; it is then promoted with all
+      its earlier mentions. One-word names never create a judge; they can only join a known judge. Pending mentions are re-checked
+      at the end of every run, so results do not depend on file order or batch size. Option A (user, clean-up fix round 2): a
+      first + last name that is on the FJC list (fjc_list below) is promoted when its judge title is seen in at least 1 case.'
+    min_cases: 3
+    title_words: ["judge", "magistrate judge", "bankruptcy judge"]
+  trailing_words:
+    source: 'data (compute_trailing_words.py) - last words of TXSD docket judge captures (dropped "<judge> <word>" rows in
+      out_cleanup_txsd_gliner2 and judge variants in out_final_txsd that are another judge plus one word), kept when seen 10+ times,
+      absent from the Census 1990 surname list, not a name suffix and not an FJC judge last name. Trailing words in this list or in
+      judges.non_name_words are trimmed from a judge name instead of dropping it; a docket name is also trimmed to the longest
+      start equal to a known judge name.'
+    words: ["motion", "selection", "parties", "hearing", "dispositive", "appearances", "plea", "trial", "pretrial", "conference", "voir", "joinder", "detention", "unassigned", "proposed", "defendant", "deft", "final", "status", "deadline", "the", "sentencing", "initial", "notification", "counsel", "responses", "pltf", "joint"]
+
+  fjc_list:
+    source: 'reference - FJC Biographical Directory of Article III judges (public export from fjc.gov; 4,074 judges in the copy used).
+      Used for the judge-vs-FJC report. A relative path is resolved next to this rules file.'
+    path: data/judges_fjc.csv
+  first_name_only:
+    source: 'reference - US Census Bureau 1990 name files (www2.census.gov/topics/genealogy/1990surnames: dist.male.first,
+      dist.female.first, dist.all.last). A single-word judge name is "first-name-like" when it is more frequent as a first name
+      (max of male / female %) than as a surname. Such a mention never creates a judge ID: it joins the one judge in the same case
+      with that first name, else it is dropped and logged.'
+    male_first: data/census1990_dist.male.first.txt
+    female_first: data/census1990_dist.female.first.txt
+    surnames: data/census1990_dist.all.last.txt
+
+# ---------------------------------------------------------------- type gate (clean-up job)
+type_gate:
+  source: 'user (clean-up job, item 1) - only judge / counsel / firm / party entities may be created; court staff, placeholders and
+    junk are dropped and logged in dropped_entities.jsonl. Word lists come from the TXSD audit of the most frequent staff- and
+    junk-looking names (report_staff_roles.txt): city interpreters, probation / pretrial / marshal desks and court case managers
+    entered as counsel, "Attorney at Law" / "State Bar Information" as firms, "Incorrectly Filed" as a party.'
+  court_staff_phrases: [interpreter, interpreters, translator, translators, "court reporter", "court reporters", "case manager",
+                        "case managers", "courtroom deputy", "deputy clerk", clerk, probation, pretrial, "pretrial services",
+                        "pretrial svcs", marshal, marshals, "court recorder", "electronic recorder", ero, "court security officer"]
+  party_staff_max_other_words:
+    source: 'choice - a party is court staff only when, besides the staff words, at most this many words remain (a desk name like
+      "<city> interpreter"); organisation parties such as a marshals service are never dropped'
+    value: 2
+  placeholders:
+    source: 'data (TXSD audit) + answer key firm rules ("Attorney at Law" is not a firm; "<Name>, Attorney at Law" is). Exact match on
+      the cleaned name.'
+    counsel: ["attorney at law", "atty at law", attorney, "see above", none, unknown, "pro se", "n a"]
+    firm: ["attorney at law", "atty at law", attorney, "attorneys at law", "law office", "law offices", "see above",
+           "see above for address", none, unknown, "pro se", "n a"]
+    firm_prefixes: ["state bar information"]
+    party: ["incorrectly filed", "filed in error", "wrong person on case", "wrong party", none]
+  junk_rule:
+    source: 'choice (revised after the pilot check) - a name is junk only when it has no letter at all. Names made of initials
+      ("A.B.", "J.M.S.T." - often minors) and short company names ("3M", "A C & S, Inc.") are real parties and are kept.'
+    must_contain_pattern: '[a-z]'
+  bar_pattern:
+    source: 'choice - a bar number in raw_info is lawyer evidence'
+    pattern: |-
+      \bbar\s*(?:no|number|#|id)\b|\bstate\s+bar\b
+  undecided_min_cases:
+    source: 'choice - counsel with no contact info, no firm and no bar number whose name appears in at least this many cases are
+      left for Stage 2 (court desks repeat across thousands of cases; real lawyers with no contact info usually appear in few)'
+    value: 20
+  model:
+    source: 'user (clean-up job, item 1b) - Stage 2 zero-shot classifier GLiNER2, run locally, once per distinct name; answers cached in
+      type_cache.jsonl. Model fastino/gliner2-base-v1 (208.5M parameters, 834 MB weights). Only the raw name is given to the model:
+      adding the source field to the text made it echo the field. A mention is dropped only for the drop labels at or above
+      min_confidence; otherwise it is kept.'
+    never_sent:
+      source: 'user (clean-up fix 3) - office names matching the federal_offices patterns, and any counsel entry with an email, phone,
+        bar number or firm, are decided by Stage 1 and never go to the model'
+    name: fastino/gliner2-base-v1
+    labels:
+      "judge": judge
+      "lawyer": counsel
+      "law firm": firm
+      "person or company in a lawsuit": party
+      "court staff: interpreter, clerk, reporter, case manager, probation, pretrial or marshal office": court_staff
+      "placeholder or junk text": junk
+    drop_labels: [court_staff, junk]
+    min_confidence: 0.8
+
+# ---------------------------------------------------------------- party roles (clean-up job)
+party_roles:
+  source: 'data (roles_report.json - all distinct parties[].party_type and role values in TXSD + pilot). party_type decides the side
+    when it is plaintiff or defendant; for other_party / misc / bk_party the role decides; everything else is "other".'
+  side_by_party_type: {plaintiff: plaintiff-side, defendant: defendant-side}
+  side_by_role:
+    "Counter Defendant": plaintiff-side
+    "Consolidated Counter Defendant": plaintiff-side
+    "Plaintiff/Counter Defendant": plaintiff-side
+    "Counter Claimant": defendant-side
+    "Consolidated Counter Claimant": defendant-side
+    "Defendant/Counter Plaintiff": defendant-side
+    "Nominal Defendent": defendant-side
+    "Defendant, 3rd Party Plaintiff": defendant-side
+  default_side: other
+
+# ---------------------------------------------------------------- logging / run
+uncertain_log:
+  source: choice (keeps uncertain_pairs.jsonl readable)
+  max_candidates_per_mention: 3
+  max_courts_shown: 10
+
+progress_every:
+  source: user (progress step)
+  files: 500
+
+removed_unused:
+  source: audit (step 1) - defined in the code but never used; removed, behaviour unchanged
+  items:
+    - COMMON_NAMES (notebook's old Rule 4 list; the context matcher never used it)
+    - ORG_WORDS (replaced by org_party_words in ctx2)

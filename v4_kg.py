@@ -451,15 +451,15 @@ def prove(a):
     inc, fresh = work / "store", work / "store_fresh_check"
     rep = {}
     if not (inc.exists() and any(inc.iterdir())):
-        build(a.export_1, a.layer_b_1, inc, "pilot")
+        build(a.export_1, a.layer_b_1, inc, "first batch")
     else:
         start(inc)
     if not running(inc):
         start(inc)
     loaded = [r for r in read_jsonl(work / "load_log.jsonl") if r.get("export") == Path(a.export_2).name]
     if not loaded:
-        add(a.export_2, a.layer_b_2, inc, "pilot+txsd500")
-    r_b = add(a.export_2, a.layer_b_2, inc, "pilot+txsd500 (same batch again)")
+        add(a.export_2, a.layer_b_2, inc, "second batch")
+    r_b = add(a.export_2, a.layer_b_2, inc, "second batch (same batch again)")
     rep["b_reload_same_batch"] = {"inserted": r_b["inserted"], "removed": r_b["removed"], "pass": r_b["inserted"] == 0 and r_b["removed"] == 0}
     forced = apply_delta(inc, set(), emit(a.export_2, a.layer_b_2))
     rep["b_reinsert_every_triple"] = {"inserted": forced["inserted"], "pass": forced["inserted"] == 0}
@@ -467,7 +467,7 @@ def prove(a):
         stop(fresh)
         shutil.move(str(fresh), str(work / f"store_fresh_check_old_{int(time.time())}"))
     fresh_parent_log = work / "load_log.jsonl"
-    build(a.export_2, a.layer_b_2, fresh, "fresh pilot+txsd500")
+    build(a.export_2, a.layer_b_2, fresh, "fresh build of both batches")
     t_inc, t_fresh = store_triples(inc), store_triples(fresh)
     rep["a_incremental_equals_fresh"] = {"incremental_triples": len(t_inc), "fresh_triples": len(t_fresh),
                                          "only_incremental": len(t_inc - t_fresh), "only_fresh": len(t_fresh - t_inc),

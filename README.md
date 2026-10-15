@@ -33,111 +33,287 @@ python v4_kg.py build --export /path/to/export --layer-b /path/to/consolidated \
   --store /path/to/kg/store --batch-id first                                              # knowledge graph
 ```
 
-## What V4 does
+**Where the numbers come from.** Every number in this README names its source file. The source files are run outputs and reports in the author's results folder `nikhil_results/`. They are not in the repo (they hold case data). Paths are relative to that folder. "Pilot" means the 1,000 pilot docket files. "TXSD" means the 50,766 docket files of one large district court.
 
-V4 reads court case files and gives stable IDs to the **judges, parties, counsel and firms** named in them. It has two layers.
+## 1. What this is
 
-- **Layer A (`v4_run_ctx.py`): fast incremental linking.** One pass per file.
-  - **Name gate.** Before a name becomes an entity, the gate decides whether the string is a PERSON, an ORGANISATION or NOT AN ENTITY:
-    - two pretrained models vote: spaCy NER on the docket sentence when there is one, and probablepeople;
-    - each distinct string is voted on once and cached;
-    - when the votes differ, data decides: a known judge in the court, the FJC list, a judge in the case's judge field, a known lawyer, firm or party;
-    - then an optional local Ollama model decides;
-    - anything still undecided goes to a review file.
-  - **Rules the gate enforces.** Judges must be persons. Counsel that is an organisation (an office) stays counsel, flagged `is_organisation` (setting `name_gate.counsel_organisation`; `firm` turns it into a firm mention instead). For parties, the gate decides person vs organisation.
-  - **Matching.** Each mention is matched against an index of saved entities, and a merge needs context evidence: same court and a compatible name for judges, shared counsel or co-party for persons, shared contact details for counsel and firms, and identical normalised names for organisations.
-  - **Incremental.** Re-running on the same output folder adds only new files (skipped by name + sha256). Old IDs never change.
-- **Layer B (`v4_consolidate.py`): learned consolidation.** Runs after Layer A and merges IDs that belong to the same real person or organisation.
-  - **The model.** A calibrated gradient-boosting model scores candidate pairs. It was trained on the pilot answer key, the FJC list and automatic name fragments, with court-grouped folds. The features cover names, shared cases and divisions, co-occurring entities and party side. Organisations add relational evidence: shared counsel, the same lawyers using both names, email domains, phones and addresses.
-  - **Organisations.** Each pair ends as SAME (merge), RELATED (an office, or a parent / subsidiary; both IDs kept and linked in `related_links.jsonl`) or DIFFERENT.
-  - **Thresholds.** A group merges automatically only where held-out precision is >= 0.98. Persons use one threshold per kind; organisations use one per evidence group. The values are in `models/model_card.md`.
-  - **Append-only.** Redirects are never undone. The surviving ID is the oldest one.
+This is entity resolution for PACER court dockets.
 
-Shared code:
-- `v4_names.py`: the name gate, the one organisation normalisation used by both layers, and display names.
-- `v4_readers.py`: input readers chosen by file structure.
+- It reads docket JSON files.
+- It finds four kinds of names: **judges, parties, counsel (lawyers) and law firms**.
+- It gives each real person or organisation one stable ID.
+- It is **incremental**. You can add new files later. Old IDs never change.
+- It ends in a **knowledge graph**: an RDF store (Tentris) you can query with SPARQL.
 
-Rules and settings:
-- Layer A: `v4_rules.yaml`.
-- Layer B: `v4_consolidate.yaml`.
-- Every list and number in those files has a `source:` note.
+It can also read OCR output of court documents (YOLO page/block JSON). That part is paused (section 6).
 
-## Setup
+## 2. Pipeline
 
-Python 3.13 (3.12 also works). probablepeople and its `python-crfsuite` dependency install fine on 3.13, so GLiNER2 is not needed as the gate's second vote.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -c "import spacy, probablepeople; spacy.load('en_core_web_md'); print('ok')"
+```mermaid
+flowchart LR
+    D[Docket JSON] --> A
+    Y[YOLO OCR JSON] -.paused.-> A
+    A["Layer A<br/>v4_run_ctx.py<br/>fast incremental linking"] --> B["Layer B<br/>v4_consolidate.py<br/>learned merges"]
+    B --> E["--export<br/>entities.jsonl + mentions.jsonl"]
+    E --> K["v4_kg.py<br/>Tentris knowledge graph"]
+    B -- "redirects, related links" --> K
 ```
 
-- **spaCy model.** `requirements.txt` installs `en_core_web_md` 3.8.0 directly. Alternatively: `python -m spacy download en_core_web_md`.
-- **GLiNER2** (document / generic readers). It downloads `fastino/gliner2-base-v1` (about 0.8 GB) on first use.
-- **Ollama** (optional `--llm local`). Install from ollama.com, then run `ollama pull qwen2.5:7b`. The model and URL are set in `v4_rules.yaml` (`name_gate.ollama`).
-- **Reference data.** `data/` holds the FJC judge list and the Census name files; see `data/README.md`.
+- **Layer A** reads each file once and links each name to a saved ID, or makes a new ID.
+- **Layer B** looks at all IDs together and merges IDs that are the same real entity.
+- **Export** writes the final result as two files.
+- **v4_kg.py** turns the export into RDF and loads it into Tentris.
 
-## Run
+## 3. Project history
+
+| Version | What it did | What went wrong | Why we moved on |
+|---|---|---|---|
+| **V1** | The original SCALES code. Judges: a spaCy NER model on docket text, then matching to the FJC list. Counsel, firms and parties: separate scripts. | Slow: 2,088 s for 1,000 pilot files, almost all in judge NER and matching. Parties could not run: they need EDGAR data and a classifier module that do not exist. Hard-coded server paths, and a bug that stops the judge build step on every run. | Too slow, and not complete. |
+| **V2** | The rule-based `research_dev` pipeline. Reads only the header and party-record fields. | Misses judges named only in docket text (mostly magistrates). Drops two-word judge names. Puts the U.S. Attorney's Offices of 14 districts in one firm ID. | Fast, but finds about half of the judges. |
+| **V3** (now `V3_overtime`) | One unified incremental pipeline for judges, firms and parties. Rules, then embeddings (local Ollama + FAISS), then an optional local LLM (qwen) for hard pairs. RDF into Tentris. | Correct on the pilot, but too slow on a full court: 8 h 49 min for TXSD on a GPU machine. Messy judge list on TXSD. Many party IDs that mix different people. | Accurate, but too slow and too many wrong party merges at full-court size. |
+| **V4** (this repo) | Fast context-based linking (Layer A), then a learned merge step (Layer B), then a knowledge graph. | See section 11 for the problems found and fixed on the way. | — |
+
+Numbers behind the table:
+
+| | V1 | V2 | V3 | V4 (this repo) |
+|---|---|---|---|---|
+| Pilot time, 1,000 files | 2,088 s | 10.4 s | 285 s (Mac), 216 s (GPU machine) | 13 s Layer A + 34 s Layer B |
+| Judge extraction F1 (pilot key) | 0.916 | 0.680 | 0.966 | 0.830 |
+| Party resolution F1 (pilot key) | not run | 0.955 | 0.958 | 0.926 |
+| Firm resolution F1 (pilot key) | 0.828 | 0.587 | 0.788 | 0.894 |
+| Full TXSD (50,766 files) | not run | 122 s | 31,721 s (8 h 49 min) | 190.3 s Layer A (pilot + TXSD, 51,766 files) |
+| TXSD party IDs that mix different surnames | not run | 1,022 | 2,922 | not measured for this version |
+
+Sources:
+- V1, V2, V3 pilot: `v1_compare/REPORT.md` and `eval_pilot1000_scoring/REPORT.md`.
+- V2, V3 TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
+- V4 pilot scores: `V4_readme_check/score_readme.txt`. V4 pilot times: `V4_readme_check/logs/times.txt`.
+- V4 TXSD time: `V4_run_final/logs/03_add_txsd.log`.
+- V1's bug (`args['simple_outnames']` on an argparse Namespace) and missing data: `v1_compare/REPORT.md`.
+- V3's 195 junk or non-judge IDs out of 798 judge IDs on TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
+
+## 4. Layer A (`v4_run_ctx.py`)
+
+Layer A reads each file once. For each name it finds, it links the name to a saved ID or makes a new one.
+
+**Indexing.** Saved entities sit in an index of name keys. Judges and counsel are keyed by surname. Parties are keyed by their normalised name (organisation acronyms also by court). Firms are keyed by normalised name and office. A new mention is compared only with the entities under its key, not with everything.
+
+**Context evidence.** A merge needs evidence beyond the name:
+- judges: same court and a compatible name;
+- person parties: shared counsel, shared firm or a shared co-party;
+- counsel and firms: shared email, phone, address or office;
+- organisation parties: the same normalised name.
+
+**Safety rules.**
+- Two different parties of one case are never merged.
+- "Doe" placeholders never merge across cases.
+- A name suffix conflict (Jr vs Sr) blocks a merge.
+- Close pairs that are not merged go to `uncertain_pairs.jsonl`.
+
+**The name gate (two models).** Before a name becomes an entity, the gate decides: PERSON, ORGANISATION or NOT AN ENTITY.
+- Vote 1: spaCy NER (`en_core_web_md`), on the docket sentence when there is one.
+- Vote 2: probablepeople (Person vs Corporation).
+- Each distinct string is voted on once and cached.
+- If the votes differ, data decides: a judge in the case's judge field, the FJC list, a known lawyer, firm or party.
+- Then, only with `--llm local`, a local Ollama model decides.
+- Anything still undecided goes to `gate_review.jsonl`.
+- Judges must be PERSON. Counsel that is an organisation (an office) stays counsel and is flagged `is_organisation`.
+- On the pilot, the gate saw 9,819 distinct strings in 10.4 s. Both models agreed on 2,532 judge mentions as person and 5,329 party mentions as organisation. 26 judge entries were dropped because both models said organisation. (source: `V4_readme_check/logs/01_layerA.log`)
+
+**Pending judges.** A judge named only in docket text first tries to join a known judge. If it matches none, it waits in `pending_judges.jsonl`. Nothing is dropped.
+- A pending name becomes a judge when it has a first and last name, a judge title, and appears in 3 or more cases.
+- Or when it is on the FJC list and its title was seen in at least 1 case.
+- It is then promoted with all its earlier mentions.
+- One-word names never create a judge.
+- The end-of-run step is a single pass, indexed by court and surname. The scaling test: 1,000 / 10,000 / 50,000 pending names take 0.01 s / 0.06 s / 0.41 s. (source: `V4_readme_check/logs/test_new.log`, check 1)
+- On the pilot, 292 docket judge mentions are still pending at the end. (source: `V4_readme_check/layerB/report.md`)
+
+**Roles and sides.** Each party mention keeps its role from the docket (e.g. Plaintiff, Defendant) and a side: plaintiff-side, defendant-side or other.
+
+**Organisations.** One normalisation is shared by Layer A and Layer B (`v4_names.py`):
+- "&", "and", "+", commas and periods count the same;
+- legal-form parts are removed using the parser's own labels (Inc., LLC);
+- text in parentheses, or after a final dash, goes to an "office" field.
+
+**Incremental mode.** Run again on the same output folder. Files already processed are skipped (by name and sha256). Old IDs never change.
+- Rerunning the same files changes nothing: all 9 output files stayed byte-identical. (source: `V4_readme_check/test_run/timings.txt` and a file compare of `run` vs `run_before_rerun`)
+- Full TXSD rerun: 27.8 s, all output checksums identical. (source: `V4_run_final/logs/04_rerun_txsd.log`, `sums_before_rerun.txt` = `sums_after_rerun.txt`)
+
+**Pilot result** (source: `V4_readme_check/logs/01_layerA.log`): 10,728 entities (judge 687, party 4,414, counsel 3,595, firm 2,032), 20,134 mentions, 267 uncertain pairs, 12.5 s.
+
+## 5. Layer B (`v4_consolidate.py`)
+
+Layer B runs after Layer A. It merges IDs that belong to the same real person or organisation.
+
+**Entity cards.** Each Layer A ID becomes a card: its name variants, cases, courts, divisions, dates, co-occurring entities, party side, and contact details.
+
+**Candidate pairs.** Only pairs of the same type that share a case, or are in the same court with similar names (character n-gram TF-IDF cosine ≥ 0.4299), are scored. The filter keeps 120 of 120 labelled same-court true pairs. (source: `models/model_card.md`) On the pilot this gives 296,553 candidate pairs. (source: `V4_readme_check/layerB/report.md`)
+
+**The learned model.** A calibrated gradient-boosting model scores each pair. (source: `models/model_card.md`)
+- Two models were compared on held-out courts. Gradient boosting: average precision 0.9893. Logistic regression: 0.9820. Gradient boosting was kept.
+- Training labels came from three sources: the pilot answer key, the FJC list, and automatic name fragments (7,290 synthetic fragments).
+- Folds are grouped by court: a test court is never seen in training.
+- Features include name similarity, name subset, first-name compatibility, shared cases, same division, co-occurring entities, dates, titles and party side.
+
+**Thresholds.** A pair kind merges automatically only where held-out precision stays ≥ 0.98. (source: `models/model_card.md`, `V4_readme_check/layerB/report.md`)
+- Merge thresholds: counsel 0.7535, judge 0.3287, person parties 0.8315.
+- Firms and organisation parties never reached 0.98, so they never auto-merge. Their pairs go to review or become RELATED links.
+- Pairs between 0.6749 and the merge threshold go to the review queue.
+- Held-out precision over all kinds at the merge thresholds: 0.9834, recall 0.8921.
+
+**Organisations.** Each organisation pair ends as SAME (merge), RELATED (an office, or a parent / subsidiary: both IDs kept and linked) or DIFFERENT. On the pilot: 203 RELATED links. (source: `V4_readme_check/layerB/report.md`)
+
+**Redirects.** A merge writes `old ID -> surviving ID` to `redirects.jsonl`. Redirects are never undone. The surviving ID is the oldest one.
+
+**Review queue.** Pairs the model is unsure about go to `review_queue.jsonl`. On the pilot: judge 1, party 22, counsel 1, firm 56. (source: `V4_readme_check/layerB/report.md`)
+
+**Pilot result** (source: `V4_readme_check/layerB/report.md`):
+
+| type | Layer A IDs | after Layer B | merged away |
+|---|---|---|---|
+| judge | 687 | 681 | 6 |
+| party | 4,414 | 4,392 | 22 |
+| counsel | 3,595 | 3,589 | 6 |
+| firm | 2,032 | 2,032 | 0 |
+
+Time: 32.4 s. Adding 500 TXSD files later: only 4,089 pairs were scored, in 3.8 s. (source: `V4_kg/runs_v2/layerB_2_pilot_txsd500/report.md`)
+
+**--export.** `--export <folder>` writes the final result as exactly two files: `entities.jsonl` and `mentions.jsonl` (section 8).
+
+## 6. Document reader (YOLO OCR JSON)
+
+**Status: paused.** It was tuned on only 7 files. It needs a new, separate test set before anyone trusts it.
+
+It reads OCR output where each file has `filename` and `pages[].blocks[]` with `class`, `confidence`, `bbox` and `text`. The reader is chosen by the file's structure, not its name.
+
+How it works:
+- **Models, not lists.** spaCy NER runs on every reading unit. GLiNER2 runs only on units where spaCy finds a person or organisation, or where contact details appear. Results are cached.
+- **Document gate.** A person needs spaCy PERSON and probablepeople Person. An organisation needs positive evidence: spaCy ORG, a legal-form part, or a high organisation score.
+- **Form text.** A line repeated across two or more documents is treated as form text, unless gate-approved names cover it.
+- **Labels.** Each value line keeps its nearest short form label (paired by bbox). A label for a non-participant role (for example a payee) makes the name "mentioned only".
+- **Relations.** A signature is linked to the firm or address that follows it, also across a page break. A person with a bar number, a law firm or an address is counsel.
+- **One role per name per case.** Docket roles of the same case override document guesses.
+
+On the 7 test files: 22.47 s in total. The gate approved 36 persons and 41 organisations and sent 108 names to review. (source: `V4_yolo_round2/document_report.jsonl`)
+
+Known problems on those 7 files:
+- An official named in a form's return section can become a party.
+- A real name with a low model score and no label pointing to it goes to review.
+- OCR debris that both models accept can still appear in `mentioned_only.jsonl`.
+
+## 7. Knowledge graph (`v4_kg.py`)
+
+`v4_kg.py` writes the export and the Layer B links as RDF and loads them into a Tentris store.
+
+**Tentris.** Version 1.1.0, at `~/.local/bin/tentris`, or set `TENTRIS_BIN`. The store is served on 127.0.0.1 only, on a free port chosen at start (never 9080). The port is written to `<store>/.tentris_port`.
+
+**Commands** (each was run on the pilot + 500 TXSD data):
 
 ```bash
-# first run: --input = .json files, folders of .json files, or .zip files (the reader is chosen by each file's structure)
-python v4_run_ctx.py --input /path/to/case_json --output /path/to/run
-
-# add files later to the same output (processed files are skipped; old IDs never change)
-python v4_run_ctx.py --input /path/to/new_files --output /path/to/run
-
-# Layer B with the saved model (also for a new court: no retraining); run it again after adding files - only new or
-# changed IDs are scored and earlier redirects are kept
-python v4_consolidate.py --input /path/to/run --output /path/to/consolidated --model models/model.joblib
-
-# the final result as exactly two files (entities.jsonl, mentions.jsonl)
-python v4_consolidate.py --input /path/to/run --output /path/to/consolidated --model models/model.joblib --export /path/to/export
-
-# optional local LLM: settles name-gate disagreements in Layer A (answers cached in the output folder)
-python v4_run_ctx.py --input ... --output ... --llm local
-# documents read with Ollama instead of GLiNER2
-python v4_run_ctx.py --input ... --output ... --doc-model ollama
-
-# train a new Layer B model (needs the answer key folder; without it, FJC + fragments only)
-python v4_consolidate.py --input /path/to/run --output /path/to/new_model_run --key /path/to/answer_key
+python v4_kg.py start  --store <store_folder> [--port N]
+python v4_kg.py stop   --store <store_folder>
+python v4_kg.py emit   --export <export_folder> --layer-b <layerB_folder> --out <file.nt>
+python v4_kg.py build  --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id <id>
+python v4_kg.py add    --export <export_folder> --layer-b <layerB_folder> --store <store_folder> --batch-id <id>
+python v4_kg.py counts --export <export_folder> --store <store_folder>
+python v4_kg.py query  --store <store_folder> [--example 1..5 | --sparql "<query>"]
+python v4_kg.py prove  --export-1 <E1> --layer-b-1 <B1> --export-2 <E2> --layer-b-2 <B2> --work <new_folder>
 ```
 
-**Input readers**, chosen by file structure, not file name:
+- `build` needs a new, empty store folder. It loads with `tentris load`, then serves.
+- `add` needs a running store.
+- `emit` writes the triples to a file and prints the validation report.
 
-| Structure | Reader |
+**Prefixes:**
+
+| Prefix | IRI | Used for |
+|---|---|---|
+| `pacer:` | `http://scales-kg.org/pacer#` | the SCALES PACER terms V3 used: `Judge`, `Party`, `LawFirm`, `JudgeMention`, `PartyMention`, `FirmMention`, `Case`, `hasName`, `hasSJID` / `hasSPID` / `hasSFID`, `hasCode`, `hasUcid`, `mentionsIn`, `resolvedTo`, `hasRole`, `hasCounselOffice` |
+| `v4:` | `http://scales-kg.org/v4#` | terms V4 adds: `Attorney`, `AttorneyMention`, `hasSCID`, `MergedRecord`, `mergedInto`, `officeLink`, `parentOrSubsidiaryLink`, `plaintiffParty` / `defendantParty` / `otherParty`, `hasJudge`, `hasAttorney`, `represents`, `isOrganisation`, side counts, `sourceDocument` |
+| `skos:` | `http://www.w3.org/2004/02/skos/core#` | `prefLabel` (display name), `altLabel` (name variants) |
+
+**IRI patterns:**
+
+| Thing | IRI |
 |---|---|
-| Docket JSON: a `ucid` plus `parties` / `docket` | the field reader |
-| OCR document: `filename` + `pages[].blocks[]` with `class`, `confidence`, `bbox`, `text` (e.g. YOLO output) | the document reader |
-| Any other JSON | the generic reader: every text field, with its JSON path |
+| judge `ent_SJ_000123` | `http://scales-kg.org/id/judge/SJ000123` |
+| party `ent_SP_…` | `http://scales-kg.org/id/party/SP…` |
+| counsel `ent_SC_…` | `http://scales-kg.org/id/counsel/SC…` |
+| firm `ent_SF_…` | `http://scales-kg.org/id/firm/SF…` |
+| case | `http://scales-kg.org/id/case/<url-encoded ucid>` |
+| mention | `http://scales-kg.org/id/mention/<mention_id>` |
 
-Document and generic readers. All document / generic files of a run are read together, after the dockets, using only models, layout and statistics from the data (no phrase lists, no form-specific rules, no name or agency lists):
+**Validation** runs before every load: the triples parse, every entity has a type and a name, and no link points to an untyped node. Pilot: 200,857 triples, 0 entities without a name, 0 dangling links. (source: `V4_kg/load_log.jsonl`)
 
-- **Cascade and cache.** spaCy NER runs on every reading unit (cached by text). GLiNER2 runs only on units where spaCy finds a person / organisation or where contact details appear (cached by unit text + label set). Consecutive short blocks that touch are joined into one reading unit, so a caption party split by the layout model is read whole.
-- **Document gate.** A person needs spaCy PERSON + probablepeople Person. An organisation needs positive evidence:
-  - spaCy ORG;
-  - a probablepeople legal-form part (Inc., LLC);
-  - or an organisation-label score at or above a threshold calibrated on the run's names that both models agree on.
+**How incremental add works.**
+1. Emit all triples for the new export.
+2. Compare them with the last loaded state (`state_loaded.nt` in the store folder).
+3. Send SPARQL `DELETE DATA` for triples that are gone (for example a changed display name or a merged-away ID).
+4. Send `INSERT DATA` for new triples.
+5. Write one line to `load_log.jsonl`.
 
-  Role words and OCR debris fail and go to `document_review.jsonl`. `mentioned_only.jsonl` keeps only gate-approved names.
-- **Template learning.** A line repeated (fuzzily, or by repeated word 3-grams) in two or more documents is form text, unless gate-approved names cover it: a repeated name (the government in every criminal caption) is a frequent participant. Each value line keeps only its nearest short form label (paired by bbox). GLiNER2 reads the label's meaning: party / lawyer / judge, or a non-participant role (payee, victim, an officer carrying out an order …), which makes the paired name mentioned-only.
-- **Confidence.** Names a participant label points to, or that fill their own line in several documents, may enter with a lower model score. The threshold is calibrated per run as the lowest score at which such names pass the gate as often as names above the default threshold, within one standard error. Other names keep the default 0.7.
-- **Relations.** A signature unit is linked to the firm / address unit that follows it, also across a page break. A person with a bar number, a law firm or a "City, ST 12345" address attached is counsel. An organisation is a firm only when attached to a lawyer.
-- **One role per name per case** from all documents of the case; a weak majority goes to review. **Docket roles of the same case override document guesses.**
+**Proof** (sources: `V4_kg/proof.json`, `V4_kg/load_log.jsonl`):
 
-Outputs:
-- **Kept with each mention:** page, bbox, confidence and the gate decision.
-- **`document_report.jsonl`:** time and gate decisions per document, and the calibrated thresholds.
-- **Settings:** `v4_rules.yaml` under `documents`.
-- **Per-document summary:** `python doc_report.py <layer A output> --names`.
+| Check | Result |
+|---|---|
+| Build the pilot | 200,857 triples in 3.28 s |
+| Add 500 TXSD files incrementally | +54,156 / −10 triples, 255,003 in total, 4.36 s |
+| Same batch again | +0 / −0 |
+| Force-insert every triple again | 0 inserted |
+| Incremental store vs a fresh build of both batches | 255,003 = 255,003 triples; 0 only in one store, 0 only in the other |
+| Entity counts, graph vs export | equal: judge 690, party 4,995, firm 2,066, counsel 3,715 |
 
-**While it runs:**
-- Layer A prints `Progress:` / `Reading:` / `Name gate:` / `End step:` lines.
-- Layer B prints a line per step.
-- `kill -USR1 <pid>` prints the current Python stack (where the run is) to the log without stopping it.
-- Every output file is written to a temp file and renamed, so an interrupted save never leaves a half-written file.
+**The Tentris web console.** Open `http://127.0.0.1:<port>/` in a browser, with the port from `<store>/.tentris_port`. It opens the "Tentris Admin Console". The Tentris binary contains a page called "SPARQL Editor", reached from inside the console. `/sparql-editor` cannot be opened directly (it returns 404). Only the console page loading (HTTP 200) was checked, not the editor in a browser.
 
-**Layer A output files:**
+**Example queries.** Run them with `python v4_kg.py query --store <store_folder> --sparql "<query>"`, or paste them into the SPARQL Editor. Each was run on the pilot + 500 TXSD store. The result sizes are from `V4_readme_check/kg_queries/*.json`. Every query starts with:
+
+```sparql
+PREFIX pacer: <http://scales-kg.org/pacer#>
+PREFIX v4:    <http://scales-kg.org/v4#>
+PREFIX skos:  <http://www.w3.org/2004/02/skos/core#>
+```
+
+1. Number of triples (result: 255,003):
+   ```sparql
+   SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }
+   ```
+2. Entities by type (10 rows; for example Party 4,995, Judge 690):
+   ```sparql
+   SELECT ?type (COUNT(?e) AS ?n) WHERE { ?e a ?type } GROUP BY ?type ORDER BY DESC(?n)
+   ```
+3. Top 10 judges by number of cases (top judge: 469 cases):
+   ```sparql
+   SELECT ?judge ?name (COUNT(DISTINCT ?case) AS ?cases)
+   WHERE { ?case v4:hasJudge ?judge . ?judge pacer:hasName ?name }
+   GROUP BY ?judge ?name ORDER BY DESC(?cases) LIMIT 10
+   ```
+4. All cases of one judge (469 rows for the top judge). Put a judge IRI from query 3 in place of `SJ000001`:
+   ```sparql
+   SELECT ?ucid WHERE { ?case v4:hasJudge <http://scales-kg.org/id/judge/SJ000001> . ?case pacer:hasUcid ?ucid } ORDER BY ?ucid
+   ```
+5. Parties in one case, by side. Put a ucid from query 4 in place of `<ucid>`:
+   ```sparql
+   SELECT ?side ?name WHERE {
+     ?case pacer:hasUcid "<ucid>" .
+     { ?case v4:plaintiffParty ?p BIND("plaintiff" AS ?side) } UNION
+     { ?case v4:defendantParty ?p BIND("defendant" AS ?side) } UNION
+     { ?case v4:otherParty ?p BIND("other" AS ?side) }
+     ?p pacer:hasName ?name } ORDER BY ?side ?name
+   ```
+6. All lawyers for one party (337 rows for the party with the most lawyers):
+   ```sparql
+   SELECT ?lawyer WHERE { ?a v4:represents <http://scales-kg.org/id/party/SP000002> . ?a pacer:hasName ?lawyer } ORDER BY ?lawyer
+   ```
+7. Layer B merges (41 rows: 8 judge, 26 party, 7 counsel):
+   ```sparql
+   SELECT ?old ?survivor ?name WHERE { ?old v4:mergedInto ?survivor . ?survivor pacer:hasName ?name } ORDER BY ?old
+   ```
+
+`python v4_kg.py query --store <store_folder>` runs five built-in examples. Each one picks its subject with an earlier query.
+
+## 8. Output files
+
+**Layer A output folder:**
 
 | File | Contents |
 |---|---|
@@ -150,11 +326,11 @@ Outputs:
 | `gate_review.jsonl` | names the gate could not decide |
 | `name_gate_cache.jsonl` | model votes per distinct string |
 | `document_review.jsonl` | document rows to check (low confidence, case-number mismatch, conflicting roles) |
-| `mentioned_only.jsonl` | names found only inside document text, not filling a participant slot (written when there are any) |
+| `mentioned_only.jsonl` | names found only inside document text, not in a participant slot (only when there are any) |
 | `document_report.jsonl` | per document: time, units sent to GLiNER2, gate decisions; plus the calibrated thresholds (documents only) |
-| `document_model_cache.jsonl` | document model results |
+| `document_model_cache.jsonl` | document model results (documents only) |
 
-**Layer B output files:**
+**Layer B output folder:**
 
 | File | Contents |
 |---|---|
@@ -164,137 +340,227 @@ Outputs:
 | `related_links.jsonl` | organisation pairs linked as RELATED |
 | `review_queue.jsonl` | pairs left for review |
 | `consolidation_state.json` | state for incremental runs |
-| `report.md` | merges, RELATED links, organisation names still split, review queue, time |
+| `report.md` | merges, RELATED links, organisation names still split, review queue, time, court-held-out pilot scores |
 | `model_card.md` | the model's features, weights, thresholds and training pairs |
 
-**`--export` files:**
+**`--export` folder:**
 
 | File | Contents |
 |---|---|
-| `entities.jsonl` | final entities with variants, courts, cases, related IDs; parties carry plaintiff / defendant / other counts; parties and counsel carry `is_organisation` |
+| `entities.jsonl` | final entities with variants, courts, cases and related IDs; parties carry plaintiff / defendant / other counts; parties and counsel carry `is_organisation` |
 | `mentions.jsonl` | every mention with its details, role / side, `is_organisation` and FINAL entity ID; pending docket judge names have a null ID |
 
-## Tests
+**Knowledge graph:**
 
-```bash
-# Layer A (49 checks; test 5 needs 1,000 real case files in V4_PILOT_DIR)
-V4_PILOT_DIR=/path/to/pilot_json python test_ctx.py tests_a
-
-# Layer B (13 checks, synthetic data, uses models/model.joblib unless V4_LB_MODEL is set)
-python test_consolidate.py tests_b
-
-# later V4 changes (22 checks): pending-judge scaling (1k / 10k / 50k names), name gate, &/and and office field,
-# office -> RELATED, export format, readers by structure, kill -USR1, safe saving, no real names in code or config
-V4_PILOT_DIR=/path/to/pilot_json python test_v4_new.py tests_new
-
-# full procedure scripts (folders as arguments)
-PYTHON=$(which python) ./v4_test_run.sh /path/to/test_folder /path/to/first_json /path/to/second_json
-PYTHON=$(which python) ./v4_consolidate_run.sh /path/to/test_folder
-```
-
-- `score.py` scores a run against the answer key: `python score.py --key /path/to/answer_key --v4dir V4=/path/to/run`.
-- The answer key and the case files are not included.
-
-## Knowledge graph (Tentris)
-
-`v4_kg.py` writes the V4 result as RDF and loads it into a Tentris store.
-
-**Inputs:** the `--export` folder (entities.jsonl, mentions.jsonl) and the Layer B output folder (redirects.jsonl, related_links.jsonl) of the same run.
-
-**Vocabulary.** It follows the SCALES PACER terms V3 used:
-
-| What | Terms |
+| File | Contents |
 |---|---|
-| Namespaces | `pacer:` = `http://scales-kg.org/pacer#`; ids `http://scales-kg.org/id/<kind>/<id>` |
-| Entities | `pacer:Judge`, `pacer:Party`, `pacer:LawFirm` |
-| Mentions | `pacer:JudgeMention` / `PartyMention` / `FirmMention` |
-| Cases | `pacer:Case` |
-| Names | `pacer:hasName`, `skos:prefLabel` / `altLabel` |
-| IDs | `pacer:hasSJID` / `hasSPID` / `hasSFID` |
-| Courts | `pacer:hasCode` |
-| Links | `pacer:mentionsIn`, `pacer:resolvedTo`, `pacer:hasRole`, `pacer:hasCounselOffice` |
+| `<store>/db/` | the Tentris database |
+| `<store>/state_loaded.nt` | every triple of the last load (used by `add` to find the difference) |
+| `<store>/.tentris_port`, `<store>/.tentris_pid` | the port and process of the running server |
+| `<store>/tentris.log` | the server log |
+| `load_log.jsonl` (next to the store folder) | one line per load: batch id, time, triples emitted / inserted / removed, total, validation |
+| `proof.json` (in the `prove` work folder) | the results of the four proof checks and the five examples |
 
-Terms V4 adds are in `v4:` (`http://scales-kg.org/v4#`):
-- `v4:Attorney` / `v4:AttorneyMention` / `v4:hasSCID` (counsel);
-- `v4:mergedInto` (Layer B merge, old ID -> surviving ID);
-- `v4:officeLink` / `v4:parentOrSubsidiaryLink`;
-- `v4:plaintiffParty` / `v4:defendantParty` / `v4:otherParty` (side per case);
-- `v4:hasJudge`, `v4:hasAttorney`, `v4:represents`;
-- `v4:isOrganisation`;
-- side counts.
+## 9. How to run
 
-**Validation** runs before every load: the output parses, every entity has a type and a name, and no link points to an untyped node.
-
-**Loads.**
-- **`build`** loads a new, empty store with `tentris load`, then serves it.
-- **`add`** compares the new export's triples with the last loaded state (`state_loaded.nt` in the store folder). It applies only the difference to the live store: SPARQL `DELETE DATA` for removed triples (e.g. a changed display name, a merged-away ID), then `INSERT DATA` for new ones. Reloading the same batch adds nothing.
-- **The load log:** every load is recorded in `load_log.jsonl` next to the store folder (batch id, time, triples inserted / removed, total).
-
-**Server.** The store is served on 127.0.0.1 only, on a free port chosen at start (never 9080), recorded in `<store>/.tentris_port`. No server address is stored in the repo.
-
-**Tentris binary.** Tentris 1.1.0, at `~/.local/bin/tentris` or set `TENTRIS_BIN`. The bundled community license is used; an expired `~/.config/tentris-license.toml` would take precedence, so remove it if present.
+**Setup.** Python 3.13.1 was used (source: `requirements.txt`).
 
 ```bash
-python v4_kg.py start  --store /path/to/kg/store [--port N]
-python v4_kg.py stop   --store /path/to/kg/store
-python v4_kg.py emit   --export /path/to/export --layer-b /path/to/consolidated --out graph.nt
-python v4_kg.py build  --export /path/to/export --layer-b /path/to/consolidated --store /path/to/kg/store --batch-id first
-python v4_kg.py add    --export /path/to/export --layer-b /path/to/consolidated --store /path/to/kg/store --batch-id next
-python v4_kg.py counts --export /path/to/export --store /path/to/kg/store
-python v4_kg.py query  --store /path/to/kg/store [--example 1..5 | --sparql "SELECT ..."]
-python v4_kg.py prove  --export-1 E1 --layer-b-1 B1 --export-2 E2 --layer-b-2 B2 --work /path/to/kg
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -c "import spacy, probablepeople; spacy.load('en_core_web_md'); print('ok')"
 ```
 
-**Layer B snapshots.** Layer B rewrites `related_links.jsonl` on every run, so keep a copy of the Layer B folder per stage (as `prove` expects) when you want to rebuild an earlier stage.
+- `requirements.txt` installs the spaCy model `en_core_web_md` 3.8.0 directly.
+- GLiNER2 (document reader only) downloads its model on first use.
+- Ollama is optional (`--llm local`). The model and URL are set in `v4_rules.yaml` under `name_gate.ollama`.
+- Tentris 1.1.0 is a separate binary (section 7).
 
-## Lists that remain, and why
+**Pilot -> add 500 TXSD -> rerun -> all at once.** These are the steps of `v4_test_run.sh`:
 
-The gate replaced the keyword lists that decided what is a name: organisation words, docket non-judge keywords, judge non-name words, court-staff phrases for names, the GLiNER2 type stage, and legal-form / abbreviation lists. The removed lists and the reasons are listed in `v4_rules.yaml` under `removed_unused`.
+```bash
+python v4_run_ctx.py --input <pilot_folder> --output <run_folder>
+python v4_run_ctx.py --input <txsd500_folder> --output <run_folder>
+python v4_run_ctx.py --input <txsd500_folder> --output <run_folder>
+python v4_run_ctx.py --input <pilot_folder> <txsd500_folder> --output <oneshot_folder>
+```
 
-What remains:
+Or all four steps with checks:
 
-- **Field and format structure:**
-  - JSON field names (`entity_types`);
-  - the docket phrase patterns that locate a judge name;
-  - case-number, email, phone, ZIP and bar-number patterns;
-  - side by party type / role (`party_roles`).
-- **Name cleaning before matching:**
-  - title words and title typos ("Judge", "Hon.", "Magistrate");
-  - name suffixes (Jr, Sr, III);
-  - apostrophes;
-  - counsel office tags ("-DOJ");
-  - stop-words for organisation initials;
-  - one leading article "the" for organisation names.
+```bash
+PYTHON=$(which python) ./v4_test_run.sh <new_test_folder> <pilot_folder> <txsd500_folder>
+```
 
-  These make keys comparable; they never decide whether a string is a name.
-- **Matching rules the user set:**
-  - the government-party fold;
-  - per-district U.S. Attorney / Federal Public Defender offices;
-  - Doe placeholders never merge across cases;
-  - placeholders ("Attorney at Law");
-  - nicknames for first-name compatibility;
-  - webmail domains (not evidence).
+Result on the current code (source: `V4_readme_check/test_run/timings.txt` and `log_*.txt`):
 
-  The gate did worse than the placeholder list on the pilot ("Attorney at Law" gets split votes), so that list stays.
-- **Court-staff roles** (`rawinfo_staff_phrases`): a counsel / firm entry naming a role such as interpreter, probation or clerk is court staff. The gate sees names, not roles.
-- **Model label names:**
-  - spaCy's own labels mapped to the three outcomes (PERSON; ORG, GPE, NORP, FAC -> ORGANISATION);
-  - the GLiNER2 label descriptions.
+| Step | Time | Result |
+|---|---|---|
+| pilot | 11.6 s | 10,728 entities, 20,134 mentions |
+| add 500 TXSD | 4.1 s | 11,507 entities, 29,469 mentions |
+| rerun the same 500 | 1.5 s | no change: every output file byte-identical |
+| all 1,500 at once | 13.1 s | 11,507 entities, 29,397 mentions |
 
-## Known limitations
+Note: the script still checks a file called `type_cache.jsonl`, which the current code no longer writes. So that one line always says "CHANGED". The other files were compared by hand: all 9 identical.
 
-- **Document reader (OCR) limits** seen on the 7 test files:
-  - An official named in a form's return section (the marshal) can become a party: the model reads that label as a participant role.
-  - A name the model scores below the calibrated threshold, with no form label pointing to it, goes to review even when real.
-  - OCR debris that both models accept as a name can still appear in mentioned_only.
-- **The LLM is off by default.** The Layer B `--llm` precision check needs labelled pilot pairs. Those contain party names and were removed from `models/model.joblib`, so Layer B LLM answers are notes only.
-- **Firms and organisation parties never auto-merge in Layer B.** On the pilot answer key, no organisation evidence group reached 0.98 held-out precision: the key has few organisation positives, and it splits spelling variants. Such pairs become RELATED links or review items.
-- **Organisation names are normalised with the parser's legal-type parts only.** "Corp." vs "Corporation" (which the parser tags as an organisation word, not a legal form) stay separate IDs. A setting that also removes one final organisation word exists (`organisations.legal_form_rule`); it raises party recall on the pilot but lowers precision.
-- **Counsel that are offices** (e.g. "Federal Defenders") stay counsel mentions flagged `is_organisation` (default setting `counsel`). With `name_gate.counsel_organisation: firm` they become firm mentions instead; the pilot answer key has no firms from the counsel field, so that lowers firm extraction precision there (0.9813 -> 0.9620).
-- **Repeat officials may still be split.** A judge or lawyer named differently with no shared context, or a docket-only name still in the pending pool, can keep two IDs.
-- **The surviving ID is the oldest one**, but `canonical_name` is rebuilt from the most complete variant.
-- **Some merges are debatable.** Party persons can be joined across linked cases on co-occurrence evidence. Every merge is listed in `report.md` with its score and top reasons.
-- **The name gate is not perfect.**
-  - Unusual names can get split votes and end in `gate_review.jsonl` (kept for docket fields, not created for documents).
-  - An all-caps title-laden string can still be read as an organisation.
-  - Both cases are logged with the two votes.
+**Layer B, then export:**
+
+```bash
+python v4_consolidate.py --input <run_folder> --output <layerB_folder> --model models/model.joblib --export <export_folder>
+```
+
+Run it again after adding files: only new or changed IDs are scored, and old redirects are kept. Keep a copy of the Layer B folder per stage if you want to rebuild an earlier stage, because `related_links.jsonl` is rewritten on every run.
+
+**Knowledge graph:**
+
+```bash
+python v4_kg.py build --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id pilot
+python v4_kg.py add   --export <next_export_folder> --layer-b <next_layerB_folder> --store <store_folder> --batch-id next
+tail -n 3 <store_parent_folder>/load_log.jsonl
+```
+
+**Other options:**
+
+```bash
+python v4_run_ctx.py --input <folder> --output <run_folder> --llm local
+python v4_run_ctx.py --input <folder> --output <run_folder> --doc-model ollama
+python v4_run_ctx.py --input <folder> --output <run_folder> --rules <rules_file>
+python v4_consolidate.py --input <run_folder> --output <new_model_folder> --key <answer_key_folder>
+python doc_report.py <layer_A_output_folder> --names
+```
+
+- `--llm local`: a local Ollama model settles name-gate disagreements (answers cached).
+- `--doc-model ollama`: documents are read with Ollama instead of GLiNER2.
+- `--rules`: another rules file. Data paths in it are relative to that file.
+- `--key` without `--model`: trains a new Layer B model.
+- `doc_report.py`: a per-document summary of a document run.
+
+**While it runs:**
+- Layer A prints `Progress:`, `Name gate:` and `End step:` lines.
+- `kill -USR1 <pid>` prints where the run is, without stopping it.
+- Every output file is written to a temp file and renamed, so a stopped run never leaves a half-written file.
+
+## 10. Tests and evaluation
+
+**Unit tests** (source: `V4_readme_check/logs/test_a.log`, `test_b.log`, `test_new.log`):
+
+```bash
+V4_PILOT_DIR=<pilot_folder> python test_ctx.py <new_folder_a>
+python test_consolidate.py <new_folder_b>
+V4_PILOT_DIR=<pilot_folder> python test_v4_new.py <new_folder_new>
+```
+
+| Suite | Checks | Result |
+|---|---|---|
+| `test_ctx.py` (Layer A; one check needs the 1,000 pilot files) | 49 | 49 passed |
+| `test_consolidate.py` (Layer B, synthetic data) | 13 | 13 passed |
+| `test_v4_new.py` (pending-judge scaling, name gate, organisation names, export, readers, safe saving, no real names in code) | 22 | 22 passed |
+
+Full procedures: `v4_test_run.sh` (section 9) and `v4_consolidate_run.sh <test_folder>` (Layer B on the folder made by `v4_test_run.sh`).
+
+**Scoring.** `score.py` scores a run against the answer key:
+
+```bash
+python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out <score.json>
+```
+
+**The answer key is not in the repo.** It covers 200 pilot files and was made by one reviewer following written rules (source: `eval_pilot1000_scoring/REPORT.md`). P = precision, R = recall. Extraction = the right name in the right file. Resolution = pairs of mentions with the same ID.
+
+**Results on the current code** (source: `V4_readme_check/score_readme.txt`; 95% bootstrap range of F1 in brackets):
+
+| Type | Extraction P / R / F1 | Resolution P / R / F1 |
+|---|---|---|
+| judge | 0.928 / 0.751 / 0.830 [0.801, 0.861] | 1.000 / 1.000 / 1.000 |
+| party | 0.998 / 0.998 / 0.998 [0.996, 0.999] | 0.984 / 0.874 / 0.926 [0.864, 0.973] |
+| firm | 0.981 / 0.980 / 0.981 [0.971, 0.989] | 0.996 / 0.811 / 0.894 [0.75, 0.934] |
+
+- Layer A and Layer B give the same scores on the pilot key. (source: same file; Layer B rows scored from the export, without the pending judge names)
+- Layer B's own report scores each pilot court with a fold model that never saw that court. It gets the same numbers. (source: `V4_readme_check/layerB/report.md`)
+- Counsel is not in the key, so it is not scored.
+
+**Earlier systems on the same key** (F1; sources: `v1_compare/REPORT.md`, `eval_pilot1000_scoring/REPORT.md`):
+
+| Type | Score | V1 | V2 | V3 bulk | V3 with qwen | V4 now |
+|---|---|---|---|---|---|---|
+| judge | extraction | 0.916 | 0.680 | 0.966 | 0.970 | 0.830 |
+| judge | resolution | 0.985 | 1.000 | 0.999 | 0.999 | 1.000 |
+| party | extraction | not run | 0.997 | 0.998 | 0.998 | 0.998 |
+| party | resolution | not run | 0.955 | 0.958 | 0.958 | 0.926 |
+| firm | extraction | 0.812 | 0.932 | 0.980 | 0.980 | 0.981 |
+| firm | resolution | 0.828 | 0.587 | 0.788 | 0.787 | 0.894 |
+
+## 11. Lessons learned
+
+**1. The party F1 collapse.**
+- What happened: one V4 version linked a party across cases only with evidence (shared counsel, firm or co-party). Party resolution F1 fell from 0.890 to 0.282 (recall 0.164). 1,427 of the 1,968 lost pairs (73%) were the government party: its 54 mentions in the key files got 50 IDs. (source: `v4_inc/REPORT_ctx.md`)
+- Fix: the government party ("United States", "USA" …) folds to one ID, and organisation parties with the same normalised name share one ID. Party resolution F1 went back up to 0.973. (source: `v4_inc/REPORT_ctx2.md`)
+
+**2. The docket-judge rule that wiped out magistrates.**
+- What happened: a clean-up rule said "docket text never creates a judge ID". Magistrates mostly appear only in docket text, and they are not on the FJC list. On TXSD, 36,503 docket mentions were dropped and judge IDs fell from 402 to 64. (source: `v4_inc/REPORT_cleanup.md`)
+- Fix: the pending pool (section 4). Nothing is dropped. A pending name is promoted after 3 cases with a title, or 1 case if it is on the FJC list. Pilot judge extraction F1 went from 0.8118 to 0.8257. (source: `v4_inc/REPORT_cleanup_fix.md`) It is 0.830 now. (source: `V4_readme_check/score_readme.txt`)
+
+**3. The TXSD hang at 50,500 files.**
+- What happened: the full TXSD run reached file 50,500 of 50,766 and never finished. The log has no final totals line, and nothing was saved. (source: `V4_Main_test/logs/03_layerA_add_txsd.log`) The cause was the end-of-run pending-judge step: it promoted one name per round and then re-checked every pending name. (source: `v4_inc/REPORT_cleanup_fix.md`)
+- Fix: one pass, indexed by court and surname. Time now grows about linearly with the number of pending names (section 4). Also added: progress lines for every end step, `kill -USR1` to show where a run is, and safe saving. Pilot + full TXSD (51,766 files) now takes 190.3 s. (source: `V4_run_final/logs/03_add_txsd.log`)
+
+**4. The "Corp." recall drop.**
+- What happened: organisation names used to lose a word list of legal forms (inc, corp, corporation, co, company …). Now they lose only the parts the parser labels as a legal type. The parser labels "Corp.", "Corporation" and "Company" as organisation words, not legal forms. So "Acme Corp." and "Acme Corporation" stay two IDs. Party resolution recall fell from 0.952 to 0.874. (sources: `v4_inc/score_final.txt` and `V4_readme_check/score_readme.txt`)
+- Fix: **not made; still open.** A setting exists: `organisations.legal_form_rule: legal_type_and_trailing_org_type` in `v4_rules.yaml`. It also removes one final organisation word. On the pilot it gives party resolution P 0.981 / R 0.930 / F1 0.955, against 0.984 / 0.874 / 0.926 with the default. (source: `V4_readme_check/score_readme.txt`, rows CorpA / CorpB) The default was not changed. Only Layer A reads this setting.
+
+## 12. Design rules
+
+- **No hard-coded names or keyword lists** for deciding what is a name. Use pretrained models, public reference data (FJC, Census) and statistics from the data. Every list and number that remains is in `v4_rules.yaml` or `v4_consolidate.yaml`, with a `source:` note. The tests check that no real names appear in the code or settings.
+- **Old IDs never change.** Incremental runs only add. Layer B only adds redirects, and the surviving ID is the oldest one.
+- **Precision first.** A merge needs evidence. Layer B merges automatically only where held-out precision is ≥ 0.98.
+- **Unsure cases go to review files**, not into the data: `uncertain_pairs.jsonl`, `gate_review.jsonl`, `pending_judges.jsonl`, `review_queue.jsonl`, `document_review.jsonl`.
+
+**Lists that remain, and why:**
+- **Field and format structure:** JSON field names; the docket phrases that locate a judge name; case-number, email, phone, ZIP and bar-number patterns; side by party role.
+- **Name cleaning before matching:** title words ("Judge", "Hon."), name suffixes (Jr, Sr, III), counsel office tags ("-DOJ"), a leading "the" for organisations. These make keys comparable. They never decide whether a string is a name.
+- **Matching rules the user set:** the government-party fold; per-district U.S. Attorney and Federal Public Defender offices; Doe placeholders; nicknames for first-name compatibility; webmail domains (not evidence).
+- **Court-staff roles:** a counsel entry naming a role such as interpreter, probation or clerk is court staff.
+- **Model label names:** spaCy's labels mapped to the three gate outcomes; the GLiNER2 label descriptions.
+
+## 13. Known limits and open items
+
+- **Full TXSD is not in the knowledge graph yet.** The graph was built and tested on the pilot + 500 TXSD files only. (source: `V4_kg/load_log.jsonl`)
+- **Layer B has not been run on full TXSD.** Layer A has: 149,767 entities, 798,166 mentions. (source: `V4_run_final/logs/03_add_txsd.log`)
+- **No test on a held-out court with its own answer key.** All scores use the pilot key. Layer B's court-held-out numbers are folds over the pilot courts, not a new court.
+- **"Usa" display casing.** The government party's display name shows as "Usa". (source: `V4_readme_check/kg_queries/q5_case_sides.json`)
+- **The "Corp." fix is open** (section 11, item 4).
+- **The document reader (YOLO) is paused** (section 6).
+- **Incremental vs all at once is not fully equal for judges.** Pilot + 500 TXSD added incrementally gives 72 more judge mentions than all 1,500 at once. All 72 are docket mentions in the added files, attached to 2 already-known judges. Entity counts are equal (11,507). The cause was not investigated. (source: `V4_readme_check/test_run/run` vs `run_oneshot`)
+- **Firms and organisation parties never auto-merge in Layer B.** On the pilot, 59 organisation names are identical after normalisation but still split into 151 IDs. (source: `V4_readme_check/layerB/report.md`)
+- **The Layer B LLM check is notes only.** It needs labelled pilot pairs, which contain party names and were removed from `models/model.joblib`.
+- **Repeat officials can still be split** when they are named differently with no shared context.
+- **The name gate is not perfect.** Unusual names can get split votes and end in `gate_review.jsonl`.
+
+## 14. Repo layout
+
+```
+.
+├── README.md
+├── requirements.txt
+├── v4_run_ctx.py            Layer A
+├── v4_rules.yaml            Layer A rules and settings (with source notes)
+├── v4_consolidate.py        Layer B
+├── v4_consolidate.yaml      Layer B settings (with source notes)
+├── v4_names.py              name gate, organisation normalisation, display names
+├── v4_readers.py            docket / OCR document / generic JSON readers
+├── v4_kg.py                 knowledge graph (RDF + Tentris)
+├── models/
+│   ├── model.joblib         trained Layer B model
+│   └── model_card.md        features, thresholds, training pairs
+├── data/
+│   ├── README.md            sources of the reference data
+│   ├── judges_fjc.csv       FJC judge list
+│   └── census1990_dist.*    Census 1990 name files
+├── test_ctx.py              Layer A tests
+├── test_consolidate.py      Layer B tests
+├── test_v4_new.py           tests for the later V4 changes
+├── v4_test_run.sh           Layer A procedure: first -> add -> rerun -> all at once
+├── v4_consolidate_run.sh    Layer B procedure
+├── score.py                 scoring against the answer key
+├── check_consolidated.py    Layer B checks
+└── doc_report.py            per-document summary
+```

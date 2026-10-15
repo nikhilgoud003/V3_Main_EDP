@@ -37,7 +37,7 @@ A.STORAGE_DIR = d
 for name, fn in (("ENTITIES_FILE", "entities.jsonl"), ("MENTIONS_FILE", "mentions.jsonl"), ("STATE_FILE", "state.json"),
                  ("UNCERTAIN_FILE", "uncertain_pairs.jsonl"), ("DROPPED_FILE", "dropped_entities.jsonl"),
                  ("PENDING_FILE", "pending_judges.jsonl"), ("GATE_REVIEW_FILE", "gate_review.jsonl"),
-                 ("DOC_REVIEW_FILE", "document_review.jsonl"), ("MENTIONED_FILE", "mentioned_only.jsonl")):
+                 ("DOC_REVIEW_FILE", "document_review.jsonl"), ("MENTIONED_FILE", "mentioned_only.jsonl"), ("DOC_REPORT_FILE", "document_report.jsonl")):
     setattr(A, name, d / fn)
 A.memory = A.MemoryManager(d)
 rng = random.Random(7)

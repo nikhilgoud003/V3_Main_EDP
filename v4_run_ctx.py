@@ -200,6 +200,7 @@ GATE_REVIEW_FILE = None
 DOC_CACHE_FILE = None
 DOC_REVIEW_FILE = None
 MENTIONED_FILE = None
+DOC_REPORT_FILE = None
 QUIET_UNCERTAIN = False   # set while re-checking pending judges, so uncertain pairs are not logged twice
 GATE = None        # v4_names.NameGate, created in main()
 EXTRACTOR = None   # v4_readers.Extractor, created on the first document / generic file
@@ -224,6 +225,7 @@ class MemoryManager:
         self.gate_review = []  # names the gate could not decide (no agreement, no known entity, no LLM)
         self.doc_review = []   # document / generic reader rows to check (low confidence, case number mismatch)
         self.mentioned_only = []  # names found only in narrative / instruction text of documents (not entities)
+        self.doc_report = []      # per-document gate decisions and time, plus the calibrated document thresholds
         self.load()
 
     def load(self):
@@ -251,7 +253,8 @@ class MemoryManager:
         if PENDING_FILE.exists():
             with open(PENDING_FILE, "r", encoding="utf-8") as f:
                 self.pending = [json.loads(l) for l in f if l.strip()]
-        for attr, fp in (("gate_review", GATE_REVIEW_FILE), ("doc_review", DOC_REVIEW_FILE), ("mentioned_only", MENTIONED_FILE)):
+        for attr, fp in (("gate_review", GATE_REVIEW_FILE), ("doc_review", DOC_REVIEW_FILE), ("mentioned_only", MENTIONED_FILE),
+                         ("doc_report", DOC_REPORT_FILE)):
             if fp.exists():
                 with open(fp, "r", encoding="utf-8") as f:
                     setattr(self, attr, [json.loads(l) for l in f if l.strip()])
@@ -276,9 +279,10 @@ class MemoryManager:
                                 ("document review", DOC_REVIEW_FILE, self.doc_review)):
             N.atomic_write_lines(fp, rows)
             print(f"End step: saved {label} ({fp.name}) | {time.perf_counter() - t0:.1f}s", flush=True)
-        if self.mentioned_only or MENTIONED_FILE.exists():
-            N.atomic_write_lines(MENTIONED_FILE, self.mentioned_only)
-            print(f"End step: saved mentioned only ({MENTIONED_FILE.name}) | {time.perf_counter() - t0:.1f}s", flush=True)
+        for rows, fp in ((self.mentioned_only, MENTIONED_FILE), (self.doc_report, DOC_REPORT_FILE)):
+            if rows or fp.exists():      # document outputs: written only when documents were read
+                N.atomic_write_lines(fp, rows)
+                print(f"End step: saved {fp.name} | {time.perf_counter() - t0:.1f}s", flush=True)
         if GATE is not None:
             GATE.save()
         if EXTRACTOR is not None:
@@ -1164,6 +1168,11 @@ def gate_decide(r, file_judges=()):
     """(label or None, how, votes). None = undecided (goes to gate_review.jsonl)."""
     sent = r.get("_sent")
     votes = GATE.votes_of(gate_name(r), sent[0] if sent else None)
+    if r["_ctx"].get("document"):
+        # documents: the reader applied the document gate (spaCy PERSON + probablepeople Person, or positive organisation
+        # evidence); a name without that decision goes to review
+        rk = (r["_ctx"].get("reader_kind") or [None])[0]
+        return (rk, "document gate", votes) if rk else (None, "document gate failed", votes)
     if votes[0] is None:
         return None, "no votes", votes
     if votes[0] == votes[1]:
@@ -1384,19 +1393,6 @@ def finish_records(extracted, ucid, court, drops):
     return records, drops
 
 
-def doc_kind_of(name, label):
-    """PERSON / ORGANISATION for a name found in a document: the name gate's two votes; when they differ, the model's
-    own label (judge / attorney -> person, law firm -> organisation), else the probablepeople vote."""
-    k = N.NameGate.key(name)
-    if k not in GATE.cache:
-        GATE.vote({k: (name, None, None)})
-    s_, p_ = GATE.votes_of(name)
-    if s_ == p_ and s_ in (N.PERSON, N.ORG):
-        return s_
-    hint = {"judge": N.PERSON, "attorney": N.PERSON, "law firm": N.ORG}.get(label)
-    return hint or (p_ if p_ in (N.PERSON, N.ORG) else None)
-
-
 def read_documents(docs, docket_recs):
     """All document / generic files of the run together (template learning and one role per name per case need every
     document); docket roles of the same case (this run's dockets and saved docket mentions) override document guesses."""
@@ -1416,8 +1412,9 @@ def read_documents(docs, docket_recs):
     for m in memory.mentions.values():
         if m["ucid"] in ucids and not (m.get("context") or {}).get("document"):
             roles[m["ucid"]].setdefault(key(m["raw_name"]), m["entity_type"])
-    res, mentioned = READERS.read_text_files(docs, EXTRACTOR, DOC_CFG, doc_kind_of, roles)
+    res, mentioned, report = READERS.read_text_files(docs, EXTRACTOR, DOC_CFG, GATE, roles)
     memory.mentioned_only.extend(mentioned)
+    memory.doc_report.extend(report)
     out = {}
     for fname, (ucid, court, extracted, reviews) in res.items():
         memory.doc_review.extend(reviews)
@@ -1759,7 +1756,7 @@ def collect_inputs(paths):
 
 def main():
     global STORAGE_DIR, ENTITIES_FILE, MENTIONS_FILE, STATE_FILE, UNCERTAIN_FILE, DROPPED_FILE, PENDING_FILE
-    global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, MENTIONED_FILE, GATE, DOC_MODEL, LLM_CFG, memory
+    global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, MENTIONED_FILE, DOC_REPORT_FILE, GATE, DOC_MODEL, LLM_CFG, memory
     faulthandler.register(signal.SIGUSR1, all_threads=True)   # `kill -USR1 <pid>` prints where the run is
     ap = argparse.ArgumentParser(description="V4 incremental entity resolution, context-aware matching (local)")
     ap.add_argument("--input", nargs="+", required=True, help=".json file(s), folder(s) of .json files, or .zip")
@@ -1789,6 +1786,7 @@ def main():
     DOC_CACHE_FILE = STORAGE_DIR / "document_model_cache.jsonl"
     DOC_REVIEW_FILE = STORAGE_DIR / "document_review.jsonl"
     MENTIONED_FILE = STORAGE_DIR / "mentioned_only.jsonl"
+    DOC_REPORT_FILE = STORAGE_DIR / "document_report.jsonl"
     DOC_MODEL = args.doc_model
     if args.llm == "local" or args.doc_model == "ollama":
         oc = GATE_CFG["ollama"]

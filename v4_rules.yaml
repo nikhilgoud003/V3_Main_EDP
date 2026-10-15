@@ -356,9 +356,33 @@ documents:
     email: "email address"
     phone: "telephone number"
     mentioned: "organisation or person only mentioned in the text, not a participant in this case"
+    organisation: "name of a company, agency, government body or other organisation"
   label_types: {judge: judge, plaintiff: party, defendant: party, party: party, attorney: counsel, "law firm": firm}
   label_sides: {plaintiff: plaintiff-side, defendant: defendant-side, party: other}
   contact_labels: [email, phone, address, bar number]
+  organisation_labels: [organisation, "law firm"]   # model labels whose score is positive organisation evidence
+  gate:
+    source: 'user (document round 2, items 2 and 5) - document names pass the gate only with positive evidence: a person needs
+      spaCy PERSON + probablepeople Person; an organisation needs spaCy ORG or an organisation-label score at or above a
+      threshold calibrated on this run''s names that both models agree on (the lowest score whose names are org_precision
+      organisations, with org_min_support names). A name that a strong participant label points to may enter with a lower
+      model score: the lowest score at which such names pass the gate as often as those above the default threshold, within
+      one standard error of that share or paired_tolerance, whichever is larger (paired_min_support names). Both thresholds are written to document_report.jsonl.'
+    org_precision: 0.95
+    org_min_support: 3
+    org_score_floor: 0.8      # "a high model score": the calibrated organisation threshold is searched from here up (choice)
+    paired_tolerance: 0.02
+    paired_min_support: 3
+  label_role_labels:
+    source: 'user (document round 2, item 3) - what a form label means is read by GLiNER2 with these descriptions (a label can
+      also name a non-participant: then the paired name is mentioned only)'
+    judge: "the role judge or magistrate judge"
+    plaintiff: "the role plaintiff, petitioner or applicant"
+    defendant: "the role defendant or respondent"
+    party: "the role party to the case"
+    attorney: "the role lawyer or attorney"
+    other role: "a role that is not a party, lawyer or judge in the case: an officer, deputy or clerk carrying out an order, a payee, victim, custodian, witness or similar"
+  label_role_types: {judge: judge, plaintiff: party, defendant: party, party: party, attorney: counsel, "other role": nonparticipant}
   contact_min_confidence: 0.4   # choice: contact details only add evidence, so the model's own threshold range is enough
   template:
     source: 'user (document fixes, item 1) - the form template is learned from the data: a line whose normalised text (lower
@@ -373,6 +397,7 @@ documents:
     label_max_words: 10        # a template line with more words, or ending in a period, is boilerplate prose, never a
                                # field label (choice)
     label_min_confidence: 0.5  # the model reading a label's role ("Printed name of party ..." -> party 0.59)
+    nonparticipant_min_confidence: 0.8   # a non-participant role (payee, victim ...) needs a clear reading (choice)
     ngram_share: 0.6           # or: this share of the line's words sits in word 3-grams found in min_documents documents
                                # (catches a label with OCR junk appended; choice)
     prose_min_other_words: 6   # a name with more than this many other words on its line is inside prose (mentioned only),
@@ -382,24 +407,27 @@ documents:
                                # label points to them (choice: caption / signature / address blocks average 2-5)
     max_pair_lines: 3
     max_pair_gap_px: 100
+    join_gap_px: 25            # consecutive short blocks this close (and overlapping horizontally) are one reading unit, so a
+                               # name split by the layout model is read whole (choice: line spacing on the test pages is 30-60)
   field_labels:
     source: 'user (document fixes, items 1-2) - the meaning of a template label is decided by the zero-shot model (GLiNER2
       classification) from these descriptions; no label phrases are listed anywhere'
     "a form label for the name of a party (plaintiff, defendant, petitioner, the party signing or waiving)": party
     "a form label for the name or signature of a lawyer or attorney": counsel
     "a form label for the name or signature of a judge": judge
+    "a form label for someone who is not a party, lawyer or judge (payee, victim, custodian, officer, witness)": nonparticipant
     "a form label for something else (a date, number, address, title, instruction or heading)": other
   one_role:
     source: 'user (document fixes, item 3) - one role per name per case: evidence from every document of the case is added
-      (the model''s label confidences for the name, the paired form label''s meaning label_weight, contact details next to the
-      only person of a block contact_bonus); the top role must hold min_share of the evidence, else the name goes to
+      (the model''s label confidences for the name, the paired form label''s meaning label_weight, an attached bar number /
+      firm / address attached_counsel_weight); the top role must hold min_share of the evidence, else the name goes to
       document_review.jsonl (choice: 0.7 = a clear majority).'
     label_weight: 1.5
     person_party_label_weight: 0.5   # the model's plaintiff / defendant / party label for a PERSON name counts half: on
                                      # the test documents it gave those labels to judges and lawyers as well
-    contact_bonus: 0.5               # bar number / email / phone / address in the block of at most contact_max_people persons
-    contact_max_people: 3
-    firm_bonus: 0.5                  # a person in the same block as a law firm
+    attached_counsel_weight: 3.0     # item 4: a person with a bar number, firm or address attached (same unit, or the
+                                     # firm / address unit that follows a signature) is counsel - this outweighs model guesses
+    contact_max_people: 3            # ... when the unit names at most this many persons
     min_share: 0.7
 
 # ---------------------------------------------------------------- party roles (clean-up job)

@@ -57,8 +57,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import v4_names as N  # noqa: E402  (shared organisation normalisation and display names)
+
 TYPES = ("judge", "party", "counsel", "firm")
-MODEL_VERSION = "layer-b-1"
+MODEL_VERSION = "layer-b-2"
+ORG_KINDS = ("firm", "party_org")
 
 FEATURES = [
     "cos",             # char n-gram TF-IDF cosine of the main names
@@ -89,6 +93,16 @@ FEATURES = [
     "comp_div",        # ... of those, in the same division as the shorter name's ID
     "is_judge", "is_party", "is_counsel", "is_firm",
     "is_person",
+    # organisations (0 for person pairs); names from v4_names.org_parts, the same normalisation as Layer A
+    "org_pair",           # both IDs are organisations
+    "org_same_core",      # same normalised core name (legal forms removed)
+    "org_same_loose",     # same core once the parser's organisation-type words are removed (Company, Corp., ...)
+    "org_office_differs", # same core, different office (text in parentheses / after a final dash)
+    "org_core_prefix",    # one core is the first words of the other
+    "org_shared_counsel", # log(1 + counsel IDs linked to both: the same lawyers used both names)
+    "org_shared_domain",  # a shared email domain
+    "org_shared_phone",
+    "org_shared_address",
 ]
 
 
@@ -112,9 +126,13 @@ def read_jsonl(p):
 
 
 def write_jsonl(p, rows):
-    with open(p, "w") as f:
+    """Temp file + rename, so an interrupted run never leaves a half-written output."""
+    p = Path(p)
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w") as f:
         for r in rows:
             f.write(json.dumps(r, sort_keys=True) + "\n")
+    os.replace(tmp, p)
 
 
 def id_num(eid):
@@ -263,17 +281,47 @@ class World:
                 "main": main, "names": names, "cases": set(e.get("ucids") or []), "n": e.get("n_mentions") or 0,
                 "titles": set(), "sides": collections.Counter(), "roles": collections.Counter(e.get("role_counts") or {}),
                 "org": [0, 0], "raw": [], "synthetic": False, "source": None}
+        rel_counsel = collections.defaultdict(set)
+        contact = collections.defaultdict(lambda: {"domains": set(), "phones": set(), "addresses": set()})
+        raws = collections.defaultdict(collections.Counter)
         for m in mentions:
+            ctx = m.get("context") or {}
+            if m.get("entity_type") == "counsel" and m.get("entity_id"):
+                doms = {e.split("@", 1)[1] for e in ctx.get("emails") or [] if "@" in e}
+                for f in ctx.get("firm_eids") or []:
+                    rel_counsel[f].add(m["entity_id"])
+                for pid in ctx.get("party_eids") or []:
+                    rel_counsel[pid].add(m["entity_id"])
+                    contact[pid]["domains"] |= doms
+                    contact[pid]["phones"] |= {x for x in ctx.get("phones") or [] if x}
+                    contact[pid]["addresses"] |= {x for x in ctx.get("addresses") or [] if x}
+            elif m.get("entity_type") == "firm" and m.get("entity_id"):
+                for k in ("domains", "phones", "addresses"):
+                    contact[m["entity_id"]][k] |= {x for x in ctx.get(k) or [] if x}
             c = self.cards.get(m.get("entity_id"))
             if c is None or m.get("unresolved"):
                 continue
-            ctx = m.get("context") or {}
+            if m.get("entity_type") == "party":
+                rel_counsel[c["id"]] |= set(ctx.get("counsel_eids") or [])
             c["titles"].update(ctx.get("titles") or [])
             c["sides"].update(m.get("side") or [])
-            for v in ctx.get("is_org") or []:
-                c["org"][1 if v else 0] += 1
-            if len(c["raw"]) < 5 and m.get("raw_name") and m["raw_name"] not in c["raw"]:
-                c["raw"].append(m["raw_name"])
+            org_vote = bool(ctx.get("is_org")) or str((ctx.get("gate") or [""])[0]).startswith(N.ORG)
+            c["org"][1 if org_vote else 0] += 1
+            if m.get("raw_name"):
+                raws[c["id"]][m["raw_name"]] += 1
+                if len(c["raw"]) < 5 and m["raw_name"] not in c["raw"]:
+                    c["raw"].append(m["raw_name"])
+        for i, c in self.cards.items():
+            c["rel_counsel"] = rel_counsel.get(i, set())
+            ct = contact.get(i) or {"domains": set(), "phones": set(), "addresses": set()}
+            c["rel_domains"], c["rel_phones"], c["rel_addresses"] = ct["domains"], ct["phones"], ct["addresses"]
+            parts = collections.Counter()
+            for r, n in raws.get(i, {}).items():
+                op = N.org_parts(r)
+                parts[(op["core"], op["office"], op["loose"])] += n
+            best = max(parts.items(), key=lambda kv: (kv[1], kv[0]))[0] if parts else (c["main"], "", c["main"])
+            c["org_core"], c["org_office"], c["org_loose"] = best
+            c["raw_all"] = sorted(raws.get(i, {}))
         for c in self.cards.values():
             self._finish(c, pivot)
         self.case_index = collections.defaultdict(set)
@@ -309,13 +357,21 @@ class World:
         c["courts"] = {p[0] for p in parts}
         c["divs"] = {p[1] for p in parts}
         c["years"] = sorted(p[2] for p in parts if p[2])
-        # parties: a person when Layer A did not mark it an organisation and its first word is a Census first name
-        c["is_person"] = c["type"] in ("judge", "counsel") or (
-            c["type"] == "party" and c["org"][1] <= c["org"][0] and bool(c["full"]) and c["full"][0] in self.nm.first_names)
+        # parties: person vs organisation as Layer A's name gate decided it (majority over the ID's mentions)
+        c["is_person"] = c["type"] in ("judge", "counsel") or (c["type"] == "party" and c["org"][1] <= c["org"][0])
+        for k in ("rel_counsel", "rel_domains", "rel_phones", "rel_addresses"):
+            c.setdefault(k, set())
+        if "org_core" not in c:
+            op = N.org_parts(c["canonical"])
+            c["org_core"], c["org_office"], c["org_loose"] = op["core"], op["office"], op["loose"]
+            c["raw_all"] = [c["canonical"]]
 
     def add_synthetic(self, card):
         self._finish(card, self.cfg["case_numbers"]["year_pivot"])
-        card["is_person"] = self.cards[card["source"]]["is_person"]   # a fragment is the same kind of name as its source
+        src = self.cards[card["source"]]
+        card["is_person"] = src["is_person"]   # a fragment is the same kind of name as its source
+        if card.get("kind") != "other_generation":
+            card["rel_counsel"] = set(src["rel_counsel"])
         self.cards[card["id"]] = card
 
     def co(self, i):
@@ -337,9 +393,14 @@ class World:
             for ts in c["toks"]:
                 if not ts:
                     continue
-                if len(ts[0]) >= 2:
-                    pool |= idx.get(ts[0], set())
-                pool |= idx.get(ts[-1], set())
+                last = idx.get(ts[-1], set())
+                if len(ts) > 1 and len(ts[0]) >= 2:
+                    first = idx.get(ts[0], set())
+                    pool |= (first & last) if len(ts[-1]) > 1 else first
+                elif len(ts) == 1:
+                    pool |= last | idx.get(ts[0], set())
+                else:
+                    pool |= last
             out = set()
             for j in pool:
                 if j == i:
@@ -400,14 +461,42 @@ def candidate_pairs(world, cut, ids_filter=None):
         for a, b in zip(share.row, share.col):
             if a < b:
                 found.add((int(a), int(b)))
-        XT = X.T.tocsc()
-        for s in range(0, len(ids), chunk):
-            S = (X[s:s + chunk] @ XT).toarray()
-            aa, bb = np.nonzero(S >= cut)
-            for a, b in zip(aa, bb):
-                a = int(a) + s
-                if a < b:
-                    found.add((a, int(b)))
+        if len(ids) <= world.cfg["candidates"]["dense_max_block"]:
+            XT = X.T.tocsc()
+            for s in range(0, len(ids), chunk):
+                S = (X[s:s + chunk] @ XT).toarray()
+                aa, bb = np.nonzero(S >= cut)
+                for a, b in zip(aa, bb):
+                    a = int(a) + s
+                    if a < b:
+                        found.add((a, int(b)))
+        else:
+            # large block: pairs that share a rare word or a rare pair of words, then the exact cosine
+            maxdf = world.cfg["candidates"]["max_key_df"]
+            keys = collections.defaultdict(list)
+            for k, i in enumerate(ids):
+                toks = sorted({w for t in world.cards[i]["toks"][:4] for w in t})
+                for w in toks:
+                    keys[w].append(k)
+                for x in range(len(toks)):
+                    for y in range(x + 1, min(len(toks), x + 6)):
+                        keys[toks[x] + "|" + toks[y]].append(k)
+            pc = set()
+            for lst in keys.values():
+                if 1 < len(lst) <= maxdf:
+                    lst = sorted(set(lst))
+                    for x in range(len(lst)):
+                        for y in range(x + 1, len(lst)):
+                            pc.add((lst[x], lst[y]))
+            pc = sorted(pc - found)
+            for s0 in range(0, len(pc), 200000):
+                part = pc[s0:s0 + 200000]
+                aa = np.array([a for a, _ in part])
+                bb = np.array([b for _, b in part])
+                sims = np.asarray(X[aa].multiply(X[bb]).sum(axis=1)).ravel()
+                for (a, b), v in zip(part, sims):
+                    if v >= cut:
+                        found.add((a, b))
         for a, b in found:
             ia, ib = ids[a], ids[b]
             if world.cards[ia]["synthetic"] and world.cards[ib]["synthetic"]:
@@ -469,6 +558,22 @@ def pair_features(world, a, b, court):
     sdivs = world.cards[short]["divs"]
     comp_div = sum(1 for j in fs if world.cards[j]["divs"] & sdivs)
     t = A["type"]
+    org = 0.0 if (A["is_person"] or B["is_person"]) else 1.0
+    if org:
+        ca, cb = A["org_core"], B["org_core"]
+        same_core = 1.0 if ca and ca == cb else 0.0
+        same_loose = 1.0 if A["org_loose"] and A["org_loose"] == B["org_loose"] else 0.0
+        office_diff = 1.0 if same_core and A["org_office"] != B["org_office"] else 0.0
+        wa, wb = ca.split(), cb.split()
+        sh, lo = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+        core_prefix = 1.0 if sh and lo[:len(sh)] == sh and len(sh) < len(lo) else 0.0
+        orgf = [org, same_core, same_loose, office_diff, core_prefix,
+                math.log1p(len(A["rel_counsel"] & B["rel_counsel"])),
+                1.0 if A["rel_domains"] & B["rel_domains"] else 0.0,
+                1.0 if A["rel_phones"] & B["rel_phones"] else 0.0,
+                1.0 if A["rel_addresses"] & B["rel_addresses"] else 0.0]
+    else:
+        orgf = [0.0] * 9
     return [
         world.cos(a, b), jw, prefix, subset, first_c, sur, float(w2i or 0), sfx,
         1.0 if min(na, nb) == 1 else 0.0, 1.0 if max(na, nb) == 1 else 0.0, float(min(na, nb)), float(max(na, nb)),
@@ -480,15 +585,33 @@ def pair_features(world, a, b, court):
         float(min(len(fs), 10)), float(min(comp_div, 10)),
         float(t == "judge"), float(t == "party"), float(t == "counsel"), float(t == "firm"),
         1.0 if (A["is_person"] and B["is_person"]) else 0.0,
-    ]
+    ] + orgf
 
 
-def feature_matrix(world, pairs):
+def feature_matrix(world, pairs, log=None):
     """pairs: list of (a, b, court) -> float array (n, len(FEATURES))."""
     X = np.zeros((len(pairs), len(FEATURES)))
+    t0 = time.time()
     for k, (a, b, ct) in enumerate(pairs):
         X[k] = pair_features(world, a, b, ct)
+        if log and (k + 1) % 200000 == 0:
+            log(f"  features: {k + 1}/{len(pairs)} pairs | {time.time() - t0:.0f}s")
     return X
+
+
+def evidence_group(world, a, b):
+    """Organisation pairs are thresholded per evidence group: shared counsel, shared contact details, or name only."""
+    A, B = world.cards[a], world.cards[b]
+    if A["rel_counsel"] & B["rel_counsel"]:
+        return "counsel"
+    if (A["rel_domains"] & B["rel_domains"]) or (A["rel_phones"] & B["rel_phones"]) or (A["rel_addresses"] & B["rel_addresses"]):
+        return "contact"
+    return "name"
+
+
+def threshold_key(world, a, b):
+    kd = pair_kind(world, a, b)
+    return f"{kd}|{evidence_group(world, a, b)}" if kd in ORG_KINDS else kd
 
 
 # ---------------------------------------------------------------- reference labels
@@ -775,10 +898,10 @@ def train(world, mentions, cfg, key_dir, log):
     chosen = max(metrics, key=lambda n: (metrics[n][cfg["model"]["pick_by"]], n))
     p = oof[chosen]
     th = cfg["thresholds"]
-    kinds = np.array([pair_kind(world, a, b) for a, b, _ in pairs])
-    # T_high per pair kind: >= precision_target on held-out courts; a kind that never reaches it gets no auto-merges
+    # T_high per pair kind (organisations: per kind AND evidence group): >= precision_target on held-out courts;
+    # a group that never reaches it gets no auto-merges
     by_kind = {}
-    kinds = np.array([str(k) for k in kinds])
+    kinds = np.array([str(threshold_key(world, a, b)) for a, b, _ in pairs])
     for kd in sorted(set(kinds)):
         m_ = kinds == kd
         t_all = threshold_high(y[m_], p[m_], th["precision_target"], th["min_support"]) if y[m_].sum() >= th["min_support"] else None
@@ -885,6 +1008,10 @@ class Clusters:
         for s in set(fa) & set(fb):
             if fa[s] - fb[s] and fb[s] - fa[s]:
                 return "would join two different full first names with the same surname"
+        if all(i in cards and cards[i]["type"] == "party" and not cards[i]["is_person"] for i in A + B):
+            ca = set().union(*[cards[i]["cases"] for i in A])
+            if any(ca & cards[j]["cases"] for j in B):
+                return "organisations listed as separate parties in one case"
         # the model's own keep-apart decisions between the two groups are respected (no chaining through them)
         for x in A:
             for y in B:
@@ -953,7 +1080,7 @@ def consolidate(world, bundle, pair_list, probs, state, fjc_map, log, run_no, ll
         ra, rb = cl.root(a), cl.root(b)
         if ra == rb:
             continue
-        t_high = t_by.get(pair_kind(world, a, b), math.inf)
+        t_high = t_by.get(threshold_key(world, a, b), math.inf)
         if p >= t_high:
             why = cl.refuse(ra, rb, scores, t_low)
             if why:
@@ -965,6 +1092,53 @@ def consolidate(world, bundle, pair_list, probs, state, fjc_map, log, run_no, ll
         elif p >= t_low:
             review.append((k, "uncertain"))
     return merges, review, cl
+
+
+def related_links(world, pair_list, probs, final_of, bundle):
+    """Organisation pairs that stay apart but are linked: RELATED = an office of the same organisation (same core name,
+    different office) or a parent / subsidiary (one core name is the first words of the other, with shared counsel or
+    contact details, or a score in the review band). Both IDs are kept."""
+    t_low = bundle["thresholds"]["T_low"]
+    out = {}
+    for k, (a, b, ct) in enumerate(pair_list):
+        A, B = world.cards[a], world.cards[b]
+        if A["is_person"] or B["is_person"] or A["type"] not in ("party", "firm"):
+            continue
+        fa, fb = final_of.get(a, a), final_of.get(b, b)
+        if fa == fb:
+            continue
+        ev = evidence_group(world, a, b)
+        rel = None
+        if A["org_core"] and A["org_core"] == B["org_core"] and A["org_office"] != B["org_office"]:
+            rel = "office"
+        else:
+            wa, wb = A["org_core"].split(), B["org_core"].split()
+            sh, lo = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+            if sh and len(sh) < len(lo) and lo[:len(sh)] == sh and (ev != "name" or probs[k] >= t_low):
+                rel = "parent_or_subsidiary"
+        if rel:
+            key = tuple(sorted((fa, fb)))
+            row = {"id_a": key[0], "id_b": key[1], "entity_type": A["type"], "relation": rel, "score": round(float(probs[k]), 6),
+                   "evidence": ev, "via_pair": [a, b],
+                   "names": [A["canonical"], B["canonical"]] if key[0] == fa else [B["canonical"], A["canonical"]]}
+            if key not in out or (row["relation"], -row["score"]) < (out[key]["relation"], -out[key]["score"]):
+                out[key] = row
+    return [out[k] for k in sorted(out)]
+
+
+def display_of(world, entity_rows_by_id, members):
+    """canonical name of a final entity: the most complete variant over all member IDs (v4_names.display_name)."""
+    raws, org = [], False
+    for i in members:
+        c = world.cards.get(i)
+        if c:
+            raws += c["raw_all"] or [c["canonical"]]
+            org = org or (c["type"] == "firm") or (c["type"] == "party" and not c["is_person"])
+        else:
+            raws.append(entity_rows_by_id[i].get("canonical_name") or "")
+    if members and entity_rows_by_id[members[0]]["entity_type"] == "judge":
+        raws = [entity_rows_by_id[i].get("canonical_name") or "" for i in members]
+    return N.display_name(raws, N.ORG if org else N.PERSON) or entity_rows_by_id[members[0]].get("canonical_name")
 
 
 def collapse(redirects):
@@ -1186,8 +1360,13 @@ def write_model_card(path, bundle):
     L += ["", "Feature meanings are in the FEATURES list at the top of v4_consolidate.py.", "",
           "## Fixed constraints (the only hand rules)", "",
           "1. never mix entity types; 2. never put two different FJC judges in one ID; 3. never put two different full first "
-          "names with the same surname in one ID. Merges are applied in descending score and also respect the model's own "
-          "keep-apart scores (p < T_low) between the two groups, so no merge chains through a pair the model separated.", ""]
+          "names with the same surname in one ID; 4. never merge organisations listed as separate parties in one case. "
+          "Merges are applied in descending score and also respect the model's own keep-apart scores (p < T_low) between "
+          "the two groups, so no merge chains through a pair the model separated. Organisation thresholds are set per "
+          "evidence group (shared counsel / shared contact details / name only); a group that never reaches the "
+          "precision target merges nothing automatically. Organisation pairs that stay apart are linked as RELATED in "
+          "related_links.jsonl: an office (same core name, different office) or a parent / subsidiary (one core name is "
+          "the first words of the other, with relational evidence or a score in the review band).", ""]
     pe = bundle.get("pilot_eval")
     if pe:
         L += ["## Pilot answer key, court-held-out (score.py, mentions mapped through redirects)", "",
@@ -1208,6 +1387,7 @@ def main():
     ap.add_argument("--cases", action="append", default=[], help="case JSON folder(s), for LLM docket snippets")
     ap.add_argument("--config", default=str(HERE / "v4_consolidate.yaml"))
     ap.add_argument("--key", help="answer key folder for training/evaluation (default: $V4_ANSWER_KEY, then config reference.answer_key_dir)")
+    ap.add_argument("--export", help="also write the final result as exactly two files (entities.jsonl, mentions.jsonl) here")
     a = ap.parse_args()
     t0 = time.time()
     cfg = load_config(a.config)
@@ -1255,24 +1435,28 @@ def main():
     if not (out / "model_card.md").exists():
         write_model_card(out / "model_card.md", bundle)
 
+    log("cards ...")
     world = World(cfg, entities, mentions)
     world.set_vectorizer(bundle["vectorizer"])
     fjc_map = fjc_ids(world, load_fjc(cfg))
+    log(f"cards: {len(world.cards)} | {time.time() - t0:.1f}s")
     # incremental: score only pairs touching IDs that are new or got new mentions/cases
     fp = {i: [c["n"], len(c["cases"])] for i, c in world.cards.items()}
     changed = {i for i, v in fp.items() if state["fingerprints"].get(i) != v}
     cands = candidate_pairs(world, bundle["candidate_cut"])
     to_score = sorted((x, y, ct) for (x, y), ct in cands.items()
                       if (x in changed or y in changed or pair_key(x, y) not in state["pair_scores"]))
-    log(f"IDs new or changed: {len(changed)}; candidate pairs {len(cands)}; scored now {len(to_score)}")
-    Xn = feature_matrix(world, to_score)
+    log(f"IDs new or changed: {len(changed)}; candidate pairs {len(cands)}; scored now {len(to_score)} | {time.time() - t0:.1f}s")
+    Xn = feature_matrix(world, to_score, log)
     pn = bundle["model"].predict_proba(Xn)[:, 1] if len(to_score) else np.zeros(0)
     for (x, y, _), q in zip(to_score, pn):
         state["pair_scores"][pair_key(x, y)] = round(float(q), 6)
     # all current candidate pairs with their (new or stored) scores go to the decision step
     pair_list = sorted((x, y, ct) for (x, y), ct in cands.items())
     probs = np.array([state["pair_scores"][pair_key(x, y)] for x, y, _ in pair_list])
+    log(f"scored | {time.time() - t0:.1f}s")
     merges, review, cl = consolidate(world, bundle, pair_list, probs, state, fjc_map, log, run_no)
+    log(f"merges decided: {len(merges)} new | {time.time() - t0:.1f}s")
 
     # LLM on uncertain review pairs (never on refused merges); auto-decides only after its precision passes
     llm_info = None
@@ -1332,16 +1516,27 @@ def main():
     groups = collections.defaultdict(list)
     for e in entities:
         groups[final_of.get(e["entity_id"], e["entity_id"])].append(e)
+    links = related_links(world, pair_list, probs, final_of, bundle)
+    write_jsonl(out / "related_links.jsonl", links)
+    rel_of = collections.defaultdict(list)
+    for r in links:
+        rel_of[r["id_a"]].append({"entity_id": r["id_b"], "relation": r["relation"]})
+        rel_of[r["id_b"]].append({"entity_id": r["id_a"], "relation": r["relation"]})
+    ent_by = {e["entity_id"]: e for e in entities}
     rows = []
     for sid in sorted(groups, key=lambda s: (groups[s][0]["entity_type"], age_key(s))):
         es = sorted(groups[sid], key=lambda e: age_key(e["entity_id"]))
         head = next((e for e in es if e["entity_id"] == sid), es[0])
-        rows.append({"entity_id": sid, "entity_type": head["entity_type"], "canonical_name": head.get("canonical_name"),
+        rows.append({"entity_id": sid, "entity_type": head["entity_type"],
+                     "canonical_name": display_of(world, ent_by, [e["entity_id"] for e in es]),
                      "name_variants": sorted({v for e in es for v in (e.get("name_variants") or [])}),
                      "courts": sorted({v for e in es for v in (e.get("courts") or [])}),
                      "ucids": sorted({v for e in es for v in (e.get("ucids") or [])}),
                      "n_mentions": sum(e.get("n_mentions") or 0 for e in es),
                      "merged_from": [e["entity_id"] for e in es if e["entity_id"] != sid],
+                     "related": rel_of.get(sid, []),
+                     **({"role_counts": dict(sum((collections.Counter(e.get("role_counts") or {}) for e in es),
+                                                  collections.Counter()))} if head["entity_type"] == "party" else {}),
                      **({"unresolved": True} if head.get("unresolved") else {})})
     write_jsonl(out / "entities_consolidated.jsonl", rows)
     write_jsonl(out / "mentions_resolved.jsonl",
@@ -1366,14 +1561,64 @@ def main():
     redirects_saved = state.pop("redirects")
     state_p.write_text(json.dumps(state, indent=1, sort_keys=True))
     state["redirects"] = redirects_saved
+    if a.export:
+        export(Path(a.export).expanduser(), rows, mentions, pending, final_of, log)
     elapsed = time.time() - t0
     write_report(out / "report.md", world, entities, rows, all_redirects, merges, rq, bundle, cfg, elapsed, run_no,
-                 pending, uncertain, final_of, llm_info, len(changed), len(to_score), len(cands))
+                 pending, uncertain, final_of, llm_info, len(changed), len(to_score), len(cands), links)
     log(f"done in {elapsed:.1f}s: {len(merges)} new merges, {len(all_redirects)} redirects in total, review queue {len(rq)}")
 
 
+def export(folder, rows, mentions, pending, final_of, log):
+    org_votes = collections.defaultdict(lambda: [0, 0])     # final entity -> [person mentions, organisation mentions]
+    for m in mentions:
+        ctx = m.get("context") or {}
+        fid = final_of.get(m.get("entity_id"), m.get("entity_id"))
+        org_votes[fid][1 if (ctx.get("is_organisation") or ctx.get("is_org")) else 0] += 1
+    """Exactly two files: entities.jsonl (final entities after Layer B) and mentions.jsonl (every mention with its
+    details, role / side and FINAL entity ID; pending docket judge mentions have entity_id null)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    ents = []
+    for r in rows:
+        e = {"entity_id": r["entity_id"], "entity_type": r["entity_type"], "canonical_name": r["canonical_name"],
+             "name_variants": r["name_variants"], "courts": r["courts"], "cases": r["ucids"], "n_mentions": r["n_mentions"],
+             "merged_from": r["merged_from"], "related": r["related"]}
+        if r["entity_type"] == "party":
+            rc = r.get("role_counts") or {}
+            e["plaintiff_side"] = rc.get("plaintiff-side", 0)
+            e["defendant_side"] = rc.get("defendant-side", 0)
+            e["other_side"] = sum(v for k, v in rc.items() if k not in ("plaintiff-side", "defendant-side"))
+        if r["entity_type"] in ("party", "counsel"):
+            pv, ov = org_votes[r["entity_id"]]
+            e["is_organisation"] = ov > pv     # counsel: an office named as counsel; party: the name gate's decision
+        if r.get("unresolved"):
+            e["unresolved"] = True
+        ents.append(e)
+    write_jsonl(folder / "entities.jsonl", ents)
+    out = []
+    for m in mentions:
+        ctx = m.get("context") or {}
+        out.append({"mention_id": m["mention_id"], "entity_type": m.get("entity_type"), "raw_name": m.get("raw_name"),
+                    "clean_name": m.get("clean_name"), "case": m.get("ucid"), "court": m.get("court"),
+                    "role": m.get("role", []), "side": m.get("side", []),
+                    "is_organisation": bool(ctx.get("is_organisation") or ctx.get("is_org")) if m.get("entity_type") in ("party", "counsel") else m.get("entity_type") == "firm",
+                    "context": ctx,
+                    "layer_a_entity_id": m.get("entity_id"),
+                    "entity_id": final_of.get(m.get("entity_id"), m.get("entity_id"))})
+    for m in pending:
+        out.append({"mention_id": None, "entity_type": "judge", "raw_name": m.get("raw_name"), "clean_name": m.get("clean_name"),
+                    "case": m.get("ucid"), "court": m.get("court"), "role": [], "side": [], "is_organisation": False,
+                    "context": m.get("context") or {},
+                    "layer_a_entity_id": None, "entity_id": None, "status": "pending docket judge (no judge ID yet)"})
+    write_jsonl(folder / "mentions.jsonl", out)
+    for extra in sorted(folder.iterdir()):
+        if extra.name not in ("entities.jsonl", "mentions.jsonl"):
+            log(f"export: note - {extra.name} in {folder} is not written by --export")
+    log(f"export: {len(ents)} entities, {len(out)} mentions -> {folder}")
+
+
 def write_report(path, world, entities, rows, all_redirects, new_merges, rq, bundle, cfg, elapsed, run_no, pending,
-                 uncertain, final_of, llm_info, n_changed, n_scored, n_cands):
+                 uncertain, final_of, llm_info, n_changed, n_scored, n_cands, links=()):
     ent = {e["entity_id"]: e for e in entities}
     before = collections.Counter(e["entity_type"] for e in entities if not e.get("unresolved"))
     after = collections.Counter(r["entity_type"] for r in rows if not r.get("unresolved"))
@@ -1390,6 +1635,27 @@ def write_report(path, world, entities, rows, all_redirects, new_merges, rq, bun
         L.append(f"| {t} | {before[t]} | {after[t]} | {before[t] - after[t]} |")
     rq_t = collections.Counter(r["entity_type"] for r in rq)
     rq_w = collections.Counter((r["entity_type"], r["why"].split(":")[0]) for r in rq)
+    rel = collections.Counter((r["entity_type"], r["relation"]) for r in links)
+    L += ["", f"## Related links ({len(links)}; both IDs kept, in related_links.jsonl)", "",
+          "| type | office | parent_or_subsidiary |", "|---|---|---|"]
+    for t in ("party", "firm"):
+        L.append(f"| {t} | {rel[(t, 'office')]} | {rel[(t, 'parent_or_subsidiary')]} |")
+    # organisation names identical after normalisation but still split (same core + office, different final IDs)
+    same = collections.defaultdict(set)
+    for r in rows:
+        if r["entity_type"] == "firm" or (r["entity_type"] == "party" and r["entity_id"] in world.cards
+                                           and not world.cards[r["entity_id"]]["is_person"]):
+            c = world.cards.get(r["entity_id"])
+            if c:
+                same[(r["entity_type"], c["org_core"], c["org_office"])].add(r["entity_id"])
+    split = sorted(((k, v) for k, v in same.items() if len(v) > 1), key=lambda kv: (-len(kv[1]), kv[0]))
+    L += ["", f"## Organisation names identical after normalisation but still split: {len(split)} names, "
+              f"{sum(len(v) for _, v in split)} IDs", "",
+          "Same normalised core name and office, different final IDs (Layer A needs shared contact details for firms and "
+          "never joins two parties of one case; Layer B merges organisations only in evidence groups that reached the "
+          "precision target).", "", "| type | normalised name | office | IDs |", "|---|---|---|---|"]
+    for (t, core, office), v in split[:30]:
+        L.append(f"| {t} | {core} | {office} | {len(v)} |")
     L += ["", "## Review queue by type", "", "| type | pairs | uncertain | refused by a safety check |", "|---|---|---|---|"]
     for t in TYPES:
         L.append(f"| {t} | {rq_t[t]} | {rq_w[(t, 'uncertain')]} | {rq_w[(t, 'refused')]} |")

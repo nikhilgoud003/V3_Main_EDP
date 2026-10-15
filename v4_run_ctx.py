@@ -27,9 +27,13 @@ Usage:
 """
 
 import argparse
-import re
-import json
+import faulthandler
 import hashlib
+import json
+import os
+import re
+import signal
+import sys
 import time
 import zipfile
 from collections import defaultdict
@@ -37,6 +41,10 @@ from pathlib import Path
 
 # --- RULES: every word list, pattern and threshold comes from v4_rules.yaml (see the `source:` notes there) ---
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import v4_names as N  # noqa: E402  (shared name gate / organisation normalisation / display names)
+import v4_readers as READERS  # noqa: E402  (document + generic JSON readers)
 
 RULES_FILE = Path(__file__).resolve().parent / "v4_rules.yaml"
 RULES = {}
@@ -90,19 +98,19 @@ def load_first_name_like(male, female, surnames):
 
 def load_rules(path=None):
     """Load v4_rules.yaml and build the module-level lists, sets and compiled patterns."""
-    global RULES, RULES_FILE, EXTRACTION_CONFIG, DOCKET_JUDGE_PATTERNS, NON_JUDGE_DOCKET_KEYWORDS
+    global RULES, RULES_FILE, EXTRACTION_CONFIG, DOCKET_JUDGE_PATTERNS, GATE_CFG, DOC_CFG, RAWINFO_STAFF_RE
     global RARE_MAX_CASES, RARE_PERSON_MIN_TOKENS, COPARTY_MAX_CASES, COPARTY_MAX_PARTIES_IN_CASE, PROGRESS_EVERY
     global WEBMAIL_DOMAINS, NAME_SUFFIXES, COUNSEL_TAG_TOKENS, GOV_PARTY_NAMES, GOV_NOT_IF_CONTAINS
-    global ORG_PARTY_RE, PLACEHOLDER_RE, USAO_RE, FPD_RE, NICKNAMES, DOE_PATTERN, CORP_SUFFIX_PATTERN, TITLE_PATTERN
+    global PLACEHOLDER_RE, USAO_RE, FPD_RE, NICKNAMES, DOE_PATTERN, TITLE_PATTERN
     global JUDGE_TITLE_PATTERN, APOSTROPHE_RE, PHONE_MIN_DIGITS, PHONE_COUNTRY_CODE, ZIP_RE, STREET_NUMBER_RE
     global UNCERTAIN_MAX_CANDIDATES, UNCERTAIN_MAX_COURTS, MATCHING_LABEL
-    global JUDGE_PARENS_RE, JUDGE_NON_NAME_WORDS, JUDGE_TITLE_EVIDENCE, TYPO_MAX_EDITS, TYPO_MIN_LEN, TYPO_BOTH_FREQ
+    global JUDGE_PARENS_RE, JUDGE_TITLE_EVIDENCE, TYPO_MAX_EDITS, TYPO_MIN_LEN, TYPO_BOTH_FREQ
     global SURNAME_ONLY_LEVELS, UNRESOLVED_PREFIX
     global COUNSEL_FULL_MIN_TOKENS, FJC_NAMES, FIRST_NAME_LIKE
-    global STAFF_RE, PARTY_STAFF_MAX_OTHER, PLACEHOLDERS, FIRM_PLACEHOLDER_PREFIXES, BAR_RE, UNDECIDED_MIN_CASES, TYPE_MODEL_CFG
+    global PLACEHOLDERS, FIRM_PLACEHOLDER_PREFIXES, BAR_RE
     global SIDE_BY_PTYPE, SIDE_BY_ROLE, DEFAULT_SIDE, JUNK_MUST_CONTAIN
     global DOCKET_CREATE_MIN_CASES, DOCKET_TITLE_RE, DOCKET_TRAILING_WORDS
-    global ORG_ABBREV, ORG_DROP_WORDS, ORG_COLLAPSE, ACR_MIN, ACR_MAX, INITIALS_SKIP, DIV_SEP_RE, DIV_WORDS, DIV_ACR_MAX, LEGAL_FORMS
+    global ACR_MIN, ACR_MAX, INITIALS_SKIP
     if path:
         RULES_FILE = Path(path).expanduser()
     with open(RULES_FILE, encoding="utf-8") as f:
@@ -110,7 +118,6 @@ def load_rules(path=None):
     RULES = R
     EXTRACTION_CONFIG = {t: dict(R["entity_types"][t]) for t in ("judge", "party", "counsel", "firm")}
     DOCKET_JUDGE_PATTERNS = [re.compile(p) for p in R["docket_judge_patterns"]["patterns"]]
-    NON_JUDGE_DOCKET_KEYWORDS = set(R["non_judge_docket_keywords"]["words"])
     pe = R["party_evidence"]
     RARE_MAX_CASES = pe["rare_max_cases"]
     RARE_PERSON_MIN_TOKENS = pe["rare_person_min_tokens"]
@@ -122,8 +129,6 @@ def load_rules(path=None):
     COUNSEL_TAG_TOKENS = set(R["counsel_tag_tokens"]["words"])
     GOV_PARTY_NAMES = set(R["government_party_names"]["names"])
     GOV_NOT_IF_CONTAINS = R["government_party_names"]["not_if_contains"]
-    ow = R["org_party_words"]
-    ORG_PARTY_RE = re.compile(_word_re(ow["words"]) + r"|\b(" + "|".join(ow["of_words"]["words"]) + r") of\b")
     ph = R["placeholder_party"]
     PLACEHOLDER_RE = re.compile(_word_re(ph["words"]) + "|^(" + "|".join(ph["exact_names"]) + ")$")
     USAO_RE = re.compile(R["federal_offices"]["usao_pattern"])
@@ -134,12 +139,10 @@ def load_rules(path=None):
         for n in names:
             NICKNAMES[n].update(names)
     DOE_PATTERN = re.compile(R["doe_pattern"]["pattern"])
-    CORP_SUFFIX_PATTERN = re.compile(_word_re(R["corp_suffix_words"]["words"]))
     TITLE_PATTERN = re.compile(_word_re(R["title_words"]["words"]))
     J = R["judges"]
     JUDGE_TITLE_PATTERN = re.compile(_word_re(R["judge_title_words"]["words"] + J["title_typos"]["words"]))
     JUDGE_PARENS_RE = re.compile(J["strip_parenthetical"]["pattern"])
-    JUDGE_NON_NAME_WORDS = set(J["non_name_words"]["words"])
     JUDGE_TITLE_EVIDENCE = {t: list(ws) for t, ws in J["title_evidence"]["titles"].items()}
     TYPO_MAX_EDITS = J["typo"]["max_first_name_edits"]
     TYPO_MIN_LEN = J["typo"]["min_first_name_length"]
@@ -147,23 +150,15 @@ def load_rules(path=None):
     SURNAME_ONLY_LEVELS = list(J["surname_only"]["levels"])
     UNRESOLVED_PREFIX = J["surname_only"]["unresolved_id_prefix"]
     O = R["organisations"]
-    ORG_ABBREV = dict(O["abbreviations"]["map"])
-    ORG_DROP_WORDS = set(O["abbreviations"]["drop_words"])
-    ORG_COLLAPSE = bool(O["collapse_single_letters"]["enabled"])
     ACR_MIN, ACR_MAX = O["acronym"]["min_length"], O["acronym"]["max_length"]
     INITIALS_SKIP = set(O["acronym"]["initials_skip_words"])
-    DIV_SEP_RE = re.compile(O["division"]["separator_pattern"])
-    DIV_WORDS = set(O["division"]["words"])
-    DIV_ACR_MAX = O["division"]["acronym_max_length"]
-    LEGAL_FORMS = set(R["corp_suffix_words"]["words"]) | set(O["legal_forms"]["extra_words"])
     COUNSEL_FULL_MIN_TOKENS = R["counsel"]["no_contact"]["full_name_min_tokens"]
     rel = lambda x: (Path(x).expanduser() if Path(x).expanduser().is_absolute() else RULES_FILE.parent / x)
     FJC_NAMES = load_fjc_names(rel(R["docket_judges"]["fjc_list"]["path"]))
     fn = R["docket_judges"]["first_name_only"]
     FIRST_NAME_LIKE = load_first_name_like(rel(fn["male_first"]), rel(fn["female_first"]), rel(fn["surnames"]))
     G = R["type_gate"]
-    STAFF_RE = re.compile(_word_re([re.escape(w) for w in G["court_staff_phrases"]]))
-    PARTY_STAFF_MAX_OTHER = G["party_staff_max_other_words"]["value"]
+    RAWINFO_STAFF_RE = re.compile(_word_re([re.escape(w) for w in G["rawinfo_staff_phrases"]["phrases"]]))
     PLACEHOLDERS = {t: set(G["placeholders"][t]) for t in ("counsel", "firm", "party")}
     FIRM_PLACEHOLDER_PREFIXES = tuple(G["placeholders"]["firm_prefixes"])
     BAR_RE = re.compile(G["bar_pattern"]["pattern"], re.I)
@@ -172,8 +167,10 @@ def load_rules(path=None):
     DOCKET_CREATE_MIN_CASES = DJ["rule"]["min_cases"]
     DOCKET_TITLE_RE = re.compile(_word_re([re.escape(w) for w in DJ["rule"]["title_words"]]), re.I)
     DOCKET_TRAILING_WORDS = set(DJ["trailing_words"]["words"])
-    UNDECIDED_MIN_CASES = G["undecided_min_cases"]["value"]
-    TYPE_MODEL_CFG = G["model"]
+    GATE_CFG = R["name_gate"]
+    DOC_CFG = R["documents"]
+    N.TRAILING_ORG_TYPE_IS_LEGAL = O["legal_form_rule"]["value"] == "legal_type_and_trailing_org_type"
+    N.org_parts.cache_clear()
     PR = R["party_roles"]
     SIDE_BY_PTYPE, SIDE_BY_ROLE, DEFAULT_SIDE = dict(PR["side_by_party_type"]), dict(PR["side_by_role"]), PR["default_side"]
     APOSTROPHE_RE = re.compile(R["apostrophes"]["pattern"])
@@ -197,10 +194,16 @@ MENTIONS_FILE = None
 STATE_FILE = None
 UNCERTAIN_FILE = None
 DROPPED_FILE = None
-TYPE_CACHE_FILE = None
 PENDING_FILE = None
+GATE_CACHE_FILE = None
+GATE_REVIEW_FILE = None
+DOC_CACHE_FILE = None
+DOC_REVIEW_FILE = None
 QUIET_UNCERTAIN = False   # set while re-checking pending judges, so uncertain pairs are not logged twice
-TYPE_MODEL = "none"   # --type-model
+GATE = None        # v4_names.NameGate, created in main()
+EXTRACTOR = None   # v4_readers.Extractor, created on the first document / generic file
+DOC_MODEL = "gliner2"
+LLM_CFG = None     # local Ollama settings when --llm local is given
 FIELD_OF = {"party": "parties[].name", "counsel": "parties[].counsel[].name",
             "firm": "parties[].counsel[].entity_info.office_name", "judge": "judge / referred_judges / parties[].judge"}
 
@@ -216,8 +219,9 @@ class MemoryManager:
         self.mentions = {}   # mention_id: mention_dict
         self.uncertain = []  # uncertain pair rows
         self.dropped = []    # dropped item rows (type gate, placeholders, docket rules, ...)
-        self.type_cache = {}  # Stage 2 answers: key -> row
         self.pending = []     # docket / one-word judge mentions waiting to join or create a judge
+        self.gate_review = []  # names the gate could not decide (no agreement, no known entity, no LLM)
+        self.doc_review = []   # document / generic reader rows to check (low confidence, case number mismatch)
         self.load()
 
     def load(self):
@@ -245,12 +249,10 @@ class MemoryManager:
         if PENDING_FILE.exists():
             with open(PENDING_FILE, "r", encoding="utf-8") as f:
                 self.pending = [json.loads(l) for l in f if l.strip()]
-        if TYPE_CACHE_FILE.exists():
-            with open(TYPE_CACHE_FILE, "r", encoding="utf-8") as f:
-                for l in f:
-                    if l.strip():
-                        row = json.loads(l)
-                        self.type_cache[row["key"]] = row
+        for attr, fp in (("gate_review", GATE_REVIEW_FILE), ("doc_review", DOC_REVIEW_FILE)):
+            if fp.exists():
+                with open(fp, "r", encoding="utf-8") as f:
+                    setattr(self, attr, [json.loads(l) for l in f if l.strip()])
         if self.mentions and not all("context" in m for m in self.mentions.values()):
             raise SystemExit("ERROR: this output folder was made by v4_run.py (mentions have no context). "
                              "Use a new --output folder for v4_run_ctx.py.")
@@ -258,28 +260,26 @@ class MemoryManager:
               f"{len(self.state['processed_files'])} processed files.", flush=True)
 
     def save(self):
+        """Every file is written to a temp file and renamed over the old one, so an interrupted save never
+        leaves a half-written output; state.json goes last (it marks the files as processed)."""
         self.state["matching"] = MATCHING_LABEL
         self.state.pop("docket_judge_cases", None)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2)
-        with open(ENTITIES_FILE, "w", encoding="utf-8") as f:
-            for ent in self.entities.values():
-                f.write(json.dumps(ent) + "\n")
-        with open(MENTIONS_FILE, "w", encoding="utf-8") as f:
-            for mnt in self.mentions.values():
-                f.write(json.dumps(mnt) + "\n")
-        with open(UNCERTAIN_FILE, "w", encoding="utf-8") as f:
-            for row in self.uncertain:
-                f.write(json.dumps(row) + "\n")
-        with open(DROPPED_FILE, "w", encoding="utf-8") as f:
-            for row in self.dropped:
-                f.write(json.dumps(row) + "\n")
-        with open(PENDING_FILE, "w", encoding="utf-8") as f:
-            for row in self.pending:
-                f.write(json.dumps(row) + "\n")
-        with open(TYPE_CACHE_FILE, "w", encoding="utf-8") as f:
-            for row in self.type_cache.values():
-                f.write(json.dumps(row) + "\n")
+        t0 = time.perf_counter()
+        for label, fp, rows in (("entities", ENTITIES_FILE, self.entities.values()),
+                                ("mentions", MENTIONS_FILE, self.mentions.values()),
+                                ("uncertain pairs", UNCERTAIN_FILE, self.uncertain),
+                                ("dropped entities", DROPPED_FILE, self.dropped),
+                                ("pending judges", PENDING_FILE, self.pending),
+                                ("gate review", GATE_REVIEW_FILE, self.gate_review),
+                                ("document review", DOC_REVIEW_FILE, self.doc_review)):
+            N.atomic_write_lines(fp, rows)
+            print(f"End step: saved {label} ({fp.name}) | {time.perf_counter() - t0:.1f}s", flush=True)
+        if GATE is not None:
+            GATE.save()
+        if EXTRACTOR is not None:
+            EXTRACTOR.save()
+        N.atomic_write_text(STATE_FILE, json.dumps(self.state, indent=2))
+        print(f"End step: saved state.json | {time.perf_counter() - t0:.1f}s", flush=True)
 
     def get_next_id(self, entity_type):
         cfg = EXTRACTION_CONFIG[entity_type]
@@ -314,9 +314,9 @@ def normalize_entity_name(raw_name, entity_type):
     if not base:
         return ""
     if entity_type in ["firm", "party"]:
-        # Standardize corporate suffixes for comparison
-        base_corp = CORP_SUFFIX_PATTERN.sub("", base)
-        return " ".join(base_corp.split()).strip() or base
+        # one organisation normalisation for both layers (v4_names.org_parts): &/and/+, punctuation and line breaks
+        # treated alike, legal forms removed with the parser's own components, office text moved out
+        return N.org_parts(raw_name)["core"] or base
     return base
 
 
@@ -442,10 +442,6 @@ def side_of(party_type, role):
     return SIDE_BY_ROLE.get(role, DEFAULT_SIDE)
 
 
-def judge_is_non_name(clean_name):
-    return any(t in JUDGE_NON_NAME_WORDS for t in clean_name.split())
-
-
 def judge_titles(raw_name):
     s = " " + " ".join(re.sub(r"[^a-z0-9]+", " ", str(raw_name).lower()).split()) + " "
     return sorted(t for t, words in JUDGE_TITLE_EVIDENCE.items() if any(f" {w} " in s for w in words))
@@ -539,135 +535,45 @@ def is_placeholder_party(clean):
     return bool(is_doe_entity(clean) or PLACEHOLDER_RE.search(clean))
 
 
-# --- Step 4: organisation keys, divisions, acronyms ---
-def collapse_letters(text):
-    """'l l c' -> 'llc': a run of single letters is joined only when it spells a legal form."""
-    if not ORG_COLLAPSE:
-        return text
-    out, run = [], []
-
-    def flush():
-        joined = "".join(run)
-        out.extend([joined] if joined in LEGAL_FORMS else run)
-        run.clear()
-
-    for t in text.split():
-        if len(t) == 1 and t.isalpha():
-            run.append(t)
-            continue
-        if run:
-            flush()
-        out.append(t)
-    if run:
-        flush()
-    return " ".join(out)
-
-
-def org_text(raw_name):
-    """Cleaned, single letters joined, abbreviations expanded (legal forms still present)."""
-    toks = collapse_letters(clean_text_base(raw_name)).split()
-    return " ".join(ORG_ABBREV.get(t, t) for t in toks)
-
-
+# --- Step 4: organisation keys and acronyms (normalisation and the office field come from v4_names) ---
 def is_acronym(raw_part):
     t = str(raw_part).strip().replace(".", "")
     return t.isalpha() and t.isupper() and ACR_MIN <= len(t) <= ACR_MAX and " " not in t
 
 
-def _suffix_is_legal_form(suffix):
-    toks = collapse_letters(clean_text_base(suffix)).split()
-    return bool(toks) and set(toks) <= LEGAL_FORMS
-
-
-def split_division(raw_name):
-    """'Parent - X Division' -> 'Parent' (suffix with a division word). Legal-form suffixes never split.
-    Single all-caps suffixes ('-CID') are handled by acronym_suffix(), which needs the court."""
-    raw = str(raw_name)
-    for m in DIV_SEP_RE.finditer(raw):
-        parent, suffix = raw[:m.start()].strip(), raw[m.end():].strip()
-        if not parent or not suffix or _suffix_is_legal_form(suffix):
-            continue
-        if set(clean_text_base(suffix).split()) & DIV_WORDS:
-            return parent
-    return raw
-
-
-def division_suffix_initials(raw_name):
-    """Initials of a division-word suffix ('Field Operations Division' -> 'fod'), for the court's acronym set."""
-    raw = str(raw_name)
-    for m in DIV_SEP_RE.finditer(raw):
-        parent, suffix = raw[:m.start()].strip(), raw[m.end():].strip()
-        if parent and suffix and not _suffix_is_legal_form(suffix) and set(clean_text_base(suffix).split()) & DIV_WORDS:
-            key = " ".join(t for t in org_text(suffix).split() if t not in ORG_DROP_WORDS)
-            return org_initials(key)
-    return ""
-
-
-def acronym_suffix(raw_form):
-    """(parent, suffix) for the first separator whose suffix is one all-caps token ('ABCD-FOD' -> ('ABCD', 'fod'))."""
-    raw = str(raw_form)
-    for m in DIV_SEP_RE.finditer(raw):
-        parent, suffix = raw[:m.start()].strip(), raw[m.end():].strip()
-        t = suffix.replace(".", "")
-        if parent and t.isalpha() and t.isupper() and 2 <= len(t) <= DIV_ACR_MAX and not _suffix_is_legal_form(suffix):
-            return parent, t.lower()
-    return None
-
-
-def batch_initials(raw_name, clean):
-    """Initials this party name adds to its court's acronym set: a full organisation name, and a division-word suffix."""
-    out = []
-    if not is_gov_party(clean) and not is_placeholder_party(clean):
-        form = split_division(raw_name)
-        if not is_acronym(form) and is_org_name(raw_name, clean):
-            ini = org_initials(org_key(form))
-            if ini:
-                out.append(ini)
-        d = division_suffix_initials(raw_name)
-        if d:
-            out.append(d)
-    return out
-
-
-def party_org_decision(raw_name, clean, court):
-    """Context fields for a party at match time: is_org, and org_key or acronym."""
-    if is_gov_party(clean) or is_placeholder_party(clean):
-        return {"is_org": []}
-    known = INDEX.org_initials.get(court, ())
-    form = split_division(raw_name)
-    has_div = form != str(raw_name)
-    sp = acronym_suffix(form)
-    if sp and sp[1] in known:
-        form, has_div = sp[0], True
-    if is_acronym(form):
-        acr = form.strip().replace(".", "").lower()
-        if has_div or acr in known:
-            return {"is_org": [True], "acronym": [acr]}
-        return {"is_org": []}
-    if is_org_name(raw_name, clean):
-        return {"is_org": [True], "org_key": [org_key(form)]}
-    return {"is_org": []}
-
-
 def org_key(raw_name):
-    """Matching key for an organisation party (callers pass the parent form when a division suffix applies)."""
-    parent = split_division(raw_name)
-    toks = [t for t in CORP_SUFFIX_PATTERN.sub(" ", org_text(parent)).split() if t not in ORG_DROP_WORDS]
-    return " ".join(toks) or normalize_entity_name(parent, "party")
+    """Matching key for an organisation: normalised core name plus its office ("<core> | <office>")."""
+    return N.org_key(raw_name)
 
 
 def org_initials(key):
-    toks = [t for t in key.split() if t not in INITIALS_SKIP]
+    toks = [t for t in key.split("|")[0].split() if t not in INITIALS_SKIP]
     ini = "".join(t[0] for t in toks)
     return ini if len(toks) >= 2 and ACR_MIN <= len(ini) <= ACR_MAX else ""
 
 
-def is_org_name(raw_name, clean):
-    """Organisation party: legal form, government / agency word, or "State / County / City of". Never a placeholder.
-    Dotted forms and abbreviations are normalised first. (All-caps acronyms are decided separately, at match time.)"""
-    if is_placeholder_party(clean):
-        return False
-    return bool(ORG_PARTY_RE.search(org_text(raw_name)))
+def org_batch_initials(raw_name, clean, kind):
+    """Initials an organisation party adds to its court's acronym set: its core name and a multi-word office."""
+    if kind != N.ORG or is_gov_party(clean) or is_placeholder_party(clean) or is_acronym(N.org_head(raw_name)):
+        return []
+    parts = N.org_parts(raw_name)
+    return [x for x in (org_initials(parts["core"]), org_initials(parts["office"])) if x]
+
+
+def party_org_decision(raw_name, clean, court, kind):
+    """Context fields for a party at match time: is_org, and org_key or acronym. kind = the name gate's decision."""
+    if is_gov_party(clean) or is_placeholder_party(clean):
+        return {"is_org": []}
+    parts = N.org_parts(raw_name)
+    office = {"office": [parts["office"]]} if parts["office"] else {}
+    head = N.org_head(raw_name)
+    if is_acronym(head):
+        acr = head.replace(".", "").lower()
+        if parts["office"] or acr in INDEX.org_initials.get(court, ()):
+            return {"is_org": [True], "acronym": [acr], **office}
+    if kind == N.ORG:
+        return {"is_org": [True], "org_key": [org_key(raw_name)], **office}
+    return {"is_org": []}
 
 
 # --- 5. CONTEXT-AWARE INDEX ---
@@ -681,6 +587,7 @@ class ContextIndex:
         self.judge_first_counts = defaultdict(int)  # (court, surname, first name) -> judge mentions (saved + batch)
         self.org_initials = defaultdict(set)  # court -> initials of organisation party names (saved + batch)
         self.counsel_name_cases = defaultdict(set)  # counsel name (tags stripped) -> cases (saved + batch)
+        self.judges_by_case = defaultdict(set)  # ucid -> judge entity IDs (not unresolved records)
 
     def keys_for(self, ent_type, clean, court, unresolved=False, ctx=None):
         ctx = ctx or {}
@@ -690,6 +597,7 @@ class ContextIndex:
             if ctx.get("org_key"):
                 k = ctx["org_key"][0]
                 ini = org_initials(k)
+                ini = ini if " | " not in k else ""   # an office of an organisation is not the organisation's acronym
                 return [("party", k)] + ([("party_initials", court, ini)] if ini else [])
         if ent_type == "judge" and unresolved:
             return [("judge_unresolved", court, surname(clean))]
@@ -700,7 +608,7 @@ class ContextIndex:
         fed = federal_agency(clean)
         if fed:
             return [("firm_fed", fed, court)]
-        return [("firm", clean)]
+        return [("firm", clean, (ctx.get("office") or [""])[0])]
 
     def register(self, ent_id, mention):
         """Add a mention's name keys and context to its entity."""
@@ -709,6 +617,8 @@ class ContextIndex:
             lst = self.by_key[k]
             if ent_id not in lst:
                 lst.append(ent_id)
+        if t == "judge" and not mention.get("unresolved") and not str(ent_id).startswith(f"ent_{UNRESOLVED_PREFIX}_"):
+            self.judges_by_case[mention["ucid"]].add(ent_id)
         c = self.ctx[ent_id]
         for field, vals in (mention.get("context") or {}).items():
             if isinstance(vals, list):
@@ -901,7 +811,7 @@ def match_firm(m, entities):
         return lst[0] if lst else None
     mc = m["context"]
     best, best_score, near = None, 0, []
-    for eid in INDEX.by_key.get(("firm", m["clean_name"]), []):
+    for eid in INDEX.by_key.get(("firm", m["clean_name"], (mc.get("office") or [""])[0]), []):
         ec = INDEX.ctx[eid]
         score = sum(bool(set(mc.get(f, [])) & ec[f]) for f in ("addresses", "phones", "domains"))
         if score > best_score:
@@ -958,7 +868,7 @@ def match_party(m, entities):
         for eid in INDEX.by_key.get(("party", key), []):
             if m["ucid"] not in entities[eid]["ucids"]:
                 return eid
-        ini = org_initials(key)
+        ini = org_initials(key) if " | " not in key else ""
         if ini:
             for eid in INDEX.by_key.get(("party_acronym", m["court"], ini), []):
                 if m["ucid"] not in entities[eid]["ucids"]:
@@ -993,7 +903,7 @@ MATCHERS = {"judge": match_judge, "counsel": match_counsel, "firm": match_firm, 
 def trim_trailing_words(clean):
     """Remove trailing docket words ("<judge> motion", "<judge> final") instead of dropping the name."""
     toks = clean.split()
-    while len(toks) > 1 and (toks[-1] in DOCKET_TRAILING_WORDS or toks[-1] in JUDGE_NON_NAME_WORDS):
+    while len(toks) > 1 and toks[-1] in DOCKET_TRAILING_WORDS:
         toks.pop()
     return " ".join(toks)
 
@@ -1022,9 +932,8 @@ def is_first_name_only(clean):
 
 def same_case_first_name(m):
     """The one known judge in this case whose first name is this single word."""
-    hits = sorted({eid for eid, e in memory.entities.items()
-                   if e["entity_type"] == "judge" and not e.get("unresolved") and m["ucid"] in e["ucids"]
-                   and person_tokens(e["normalized_name"])[0][:1] == [m["clean_name"]]})
+    hits = sorted(eid for eid in INDEX.judges_by_case.get(m["ucid"], ())
+                  if person_tokens(memory.entities[eid]["normalized_name"])[0][:1] == [m["clean_name"]])
     return hits[0] if len(hits) == 1 else None
 
 
@@ -1058,125 +967,289 @@ def create_judge(m, stats):
     return eid
 
 
+def _qualified(ms_by_name):
+    """Pending names that may create a judge: first + last name, judge title in DOCKET_CREATE_MIN_CASES+ cases, or an
+    FJC-listed name with the title seen once (option A). Returns [(-n_cases, name)] sorted."""
+    out = []
+    for name, ms in ms_by_name.items():
+        if len(person_tokens(name)[0]) < 2 or not any(x["context"].get("docket") for x in ms):
+            continue
+        n_cases = len({x["ucid"] for x in ms if x["context"].get("docket_title")})
+        core = person_tokens(name)[0]
+        on_fjc = len(core) >= 2 and (core[0], core[-1]) in FJC_NAMES
+        if n_cases >= DOCKET_CREATE_MIN_CASES or (on_fjc and n_cases >= 1):
+            out.append((-n_cases, name))
+    return sorted(out)
+
+
 def resolve_pending(stats):
-    """Re-check every pending judge mention: join a known judge, or promote a qualified docket name (first + last name,
-    judge title, DOCKET_CREATE_MIN_CASES+ cases) with all its mentions. Repeats until nothing changes."""
+    """End-of-run step for pending judge mentions, in ONE pass over groups keyed by (court, surname):
+      1. trim docket names to known judges and join known judges (index lookups only);
+      2. per (court, surname) group: promote the qualified name with the most cases, then re-match only that group's
+         remaining names (a new judge can only attract names with its surname in its court), repeat inside the group;
+      3. names whose trimmed form is now a known judge join it;
+      4. one-word first names join the one judge in the same case with that first name (indexed by case).
+    Work grows with the number of pending names, not with names x promotions."""
     global QUIET_UNCERTAIN
     QUIET_UNCERTAIN = True
+    t0 = time.perf_counter()
     pend = sorted(memory.pending, key=lambda m: (m["court"], m["clean_name"], m["ucid"], m["raw_name"]))
-    changed = True
-    while changed:
-        changed = False
-        rest = []
-        for m in pend:
-            if m["context"].get("docket"):
-                trim_to_known_judge(m)   # same trimming as in the matching pass, now that more judges may be known
-            if is_first_name_only(m["clean_name"]):
-                eid = same_case_first_name(m)
-            else:
-                r = match_judge(m, memory.entities)
-                eid = r if r and r != UNRESOLVED else None
-            if eid:
-                attach_judge(m, eid, stats)
-                changed = True
-            else:
-                rest.append(m)
-        pend = rest
-        groups = defaultdict(list)
-        for m in pend:
-            if len(person_tokens(m["clean_name"])[0]) >= 2 and m["context"].get("docket"):
-                groups[(m["court"], m["clean_name"])].append(m)
-        # promote ONE qualified name per round (most cases first), then re-match, so variants of a just-created judge
-        # ("<name> III", "<first> <last>" vs "<first> <middle> <last>") join it instead of becoming separate judges
-        qualified = []
-        for key in sorted(groups):
-            ms = groups[key]
-            n_cases = len({x["ucid"] for x in ms if x["context"].get("docket_title")})
-            core = person_tokens(key[1])[0]
-            on_fjc = len(core) >= 2 and (core[0], core[-1]) in FJC_NAMES   # option A: FJC-listed name, title seen once is enough
-            if n_cases >= DOCKET_CREATE_MIN_CASES or (on_fjc and n_cases >= 1):
-                qualified.append((-n_cases, key))
-        if qualified:
-            key = sorted(qualified)[0][1]
-            ms = groups[key]
-            eid = create_judge(ms[0], stats)
-            for x in ms[1:]:
+    print(f"End step: pending judges - {len(pend)} mentions", flush=True)
+    first_only, rest = [], []
+    for m in pend:
+        if m["context"].get("docket"):
+            trim_to_known_judge(m)
+        if is_first_name_only(m["clean_name"]):
+            first_only.append(m)
+            continue
+        r = match_judge(m, memory.entities)
+        if r and r != UNRESOLVED:
+            attach_judge(m, r, stats)
+        else:
+            rest.append(m)
+    print(f"End step: pending judges - joined known judges, {len(rest)} left | {time.perf_counter() - t0:.1f}s", flush=True)
+    groups = defaultdict(list)
+    for m in rest:
+        groups[(m["court"], surname(m["clean_name"]))].append(m)
+    left = []
+    for gi, key in enumerate(sorted(groups), start=1):
+        ms = groups[key]
+        while True:
+            by_name = defaultdict(list)
+            for x in ms:
+                by_name[x["clean_name"]].append(x)
+            q = _qualified(by_name)
+            if not q:
+                break
+            name = q[0][1]
+            chosen = by_name[name]
+            eid = create_judge(chosen[0], stats)
+            for x in chosen[1:]:
                 attach_judge(x, eid, stats)
-            done_ids = {id(x) for x in ms}
-            pend = [m for m in pend if id(m) not in done_ids]
-            changed = True
-    memory.pending = pend
+            nxt = []
+            for x in ms:
+                if x["clean_name"] == name:
+                    continue
+                r = match_judge(x, memory.entities)
+                if r and r != UNRESOLVED:
+                    attach_judge(x, r, stats)
+                else:
+                    nxt.append(x)
+            ms = nxt
+        left.extend(ms)
+        if gi % 5000 == 0:
+            print(f"End step: pending judges - {gi}/{len(groups)} court+surname groups | {time.perf_counter() - t0:.1f}s", flush=True)
+    still = []
+    for m in left:
+        if m["context"].get("docket"):
+            trim_to_known_judge(m)
+            if m["context"].get("trimmed_from"):
+                r = match_judge(m, memory.entities)
+                if r and r != UNRESOLVED:
+                    attach_judge(m, r, stats)
+                    continue
+        still.append(m)
+    for m in first_only:
+        eid = same_case_first_name(m)
+        if eid:
+            attach_judge(m, eid, stats)
+        else:
+            still.append(m)
+    memory.pending = sorted(still, key=lambda m: (m["court"], m["clean_name"], m["ucid"], m["raw_name"]))
     QUIET_UNCERTAIN = False
-    stats["pending_judge_mentions_left"] = len(pend)
+    stats["pending_judge_mentions_left"] = len(memory.pending)
+    print(f"End step: pending judges done - {len(memory.pending)} left | {time.perf_counter() - t0:.1f}s", flush=True)
 
 
 DROPPED = defaultdict(int)  # drop counts by reason, reported in the run summary
 
 
-def drop_row(rec, reason, stage, field=None):
-    DROPPED[reason.split(":")[0] if stage != "stage2" else reason.split(" (")[0]] += 1
-    return {"entity_type": rec.get("entity_type"), "raw_name": rec.get("raw_name"), "clean_name": rec.get("clean_name"),
-            "ucid": rec.get("ucid"), "court": rec.get("court"), "field": field or FIELD_OF.get(rec.get("entity_type"), ""),
-            "reason": reason, "stage": stage}
+def drop_row(rec, reason, stage, field=None, votes=None):
+    DROPPED[reason.split(":")[0]] += 1
+    row = {"entity_type": rec.get("entity_type"), "raw_name": rec.get("raw_name"), "clean_name": rec.get("clean_name"),
+           "ucid": rec.get("ucid"), "court": rec.get("court"), "field": field or FIELD_OF.get(rec.get("entity_type"), ""),
+           "reason": reason, "stage": stage}
+    if votes:
+        row["votes"] = {"spacy": votes[0], "probablepeople": votes[1]}
+    return row
 
 
 def type_gate_stage1(rec):
-    """('keep' | 'drop' | 'undecided', reason) for counsel / firm / party records, from record signals and v4_rules.yaml."""
-    t, raw, ctx = rec["entity_type"], rec["raw_name"], rec["_ctx"]
+    """('keep' | 'drop', reason) for counsel / firm / party records from structural signals: no letters, a placeholder
+    from v4_rules.yaml, the counsel record's raw_info naming a court-staff role with no email. Whether the string is a
+    person, an organisation or not an entity is decided by the name gate (v4_names.NameGate)."""
+    t, ctx = rec["entity_type"], rec["_ctx"]
     clean = counsel_core(rec["clean_name"]) if t == "counsel" else rec["clean_name"]
     if not JUNK_MUST_CONTAIN.search(rec["clean_name"]):
         return "drop", "junk: no letters"
     if clean in PLACEHOLDERS.get(t, ()) or (t == "firm" and clean.startswith(FIRM_PLACEHOLDER_PREFIXES)):
         return "drop", f"placeholder: '{clean}'"
-    hit = STAFF_RE.search(clean)
-    if hit:
-        if t in ("counsel", "firm"):
-            return "drop", f"court staff: '{hit.group(0)}' in the name"
-        rest = [w for w in STAFF_RE.sub(" ", clean).split()]
-        if len(rest) <= PARTY_STAFF_MAX_OTHER and not is_org_name(raw, rec["clean_name"]):
-            return "drop", f"court staff: '{hit.group(0)}' party name"
-    if t in ("counsel", "firm") and federal_agency(clean):
-        return "keep", "federal office name (decided by Stage 1, never sent to Stage 2)"
-    if t == "counsel":
-        if ctx.get("rawinfo_staff") and not ctx.get("emails"):
-            return "drop", f"court staff: '{ctx['rawinfo_staff'][0]}' in raw_info, no email"
-        if counsel_has_contact(ctx) or ctx.get("bar"):
-            return "keep", "lawyer evidence (contact / firm / bar)"
-        if len(INDEX.counsel_name_cases.get(clean, ())) >= UNDECIDED_MIN_CASES:
-            return "undecided", f"no contact info, name in {UNDECIDED_MIN_CASES}+ cases"
-        return "keep", "no contact info, few cases"
+    if t in ("counsel", "firm"):
+        hit = RAWINFO_STAFF_RE.search(clean)
+        if hit and not federal_agency(clean):
+            return "drop", f"court staff: role '{hit.group(0)}' in the name"
+    if t == "counsel" and ctx.get("rawinfo_staff") and not ctx.get("emails"):
+        return "drop", f"court staff: '{ctx['rawinfo_staff'][0]}' in raw_info, no email"
     return "keep", "default"
 
 
-def type_cache_key(rec):
-    t = rec["entity_type"]
-    clean = counsel_core(rec["clean_name"]) if t == "counsel" else rec["clean_name"]
-    return f"{t}|{clean}|no-contact-many-cases"
+# --- the name gate (v4_names.NameGate): PERSON / ORGANISATION / NOT_ENTITY ---
+ROLE_WORD = {"judge": "judge", "counsel": "lawyer (counsel)", "party": "party", "firm": "law firm or office"}
 
 
-_GLINER = None
+def gate_name(r):
+    """The string the gate reads: judge names without their titles (the same title cleaning as the judge key), other
+    names as written."""
+    return judge_display_name(r["raw_name"]) if r["entity_type"] == "judge" else r["raw_name"]
 
 
-def classify_with_model(keys_raw):
-    """Stage 2: GLiNER2 zero-shot labels for {cache_key: raw_name}; answers go to memory.type_cache."""
-    global _GLINER
-    if not keys_raw:
-        return 0
-    if _GLINER is None:
-        import warnings
-        warnings.filterwarnings("ignore")
-        from gliner2 import GLiNER2
-        print(f"Loading {TYPE_MODEL_CFG['name']} ...", flush=True)
-        _GLINER = GLiNER2.from_pretrained(TYPE_MODEL_CFG["name"])
-    labels = TYPE_MODEL_CFG["labels"]
-    keys = sorted(keys_raw)
-    res = _GLINER.batch_classify_text([keys_raw[k] for k in keys], {"type": list(labels)}, include_confidence=True)
-    for k, r in zip(keys, res):
-        lab = r["type"]["label"] if isinstance(r.get("type"), dict) else r.get("type")
-        conf = float(r["type"].get("confidence", 0)) if isinstance(r.get("type"), dict) else 0.0
-        memory.type_cache[k] = {"key": k, "name": keys_raw[k], "label": labels.get(lab, lab), "confidence": round(conf, 4),
-                                "model": TYPE_MODEL_CFG["name"]}
-    return len(keys)
+def gate_known(r, votes, file_judges=()):
+    """Tie-break with data when the two models disagree: (label, reason) or None. file_judges = clean names of the
+    judges already accepted from this file's own judge fields (they are known before they are saved)."""
+    t, clean, court = r["entity_type"], r["clean_name"], r["court"]
+    if t == "judge":
+        core = person_tokens(clean)[0]
+        for fj in file_judges:
+            fc = person_tokens(fj)[0]
+            if (person_names_compatible(clean, fj) or (len(core) == 1 and fc and core[0] in (fc[-1], fc[0]))
+                    or " ".join(clean.split()[:len(fj.split())]) == fj):
+                return N.PERSON, "matches a judge in this case's judge field"
+        for eid in INDEX.by_key.get(("judge", surname(clean)), []):
+            e = memory.entities[eid]
+            if court in e["courts"] and (entity_fits(clean, e, "judge") or (len(core) == 1 and not e.get("unresolved"))):
+                return N.PERSON, "matches a known judge in this court"
+        if is_first_name_only(clean) and any(person_tokens(memory.entities[eid]["normalized_name"])[0][:1] == [clean]
+                                             for eid in INDEX.judges_by_case.get(r["ucid"], ())):
+            return N.PERSON, "first name of a judge of this case"
+        toks = clean.split()
+        for k in range(len(toks) - 1, 1, -1):          # starts with a known judge's full name ("<judge> <docket word>")
+            prefix = " ".join(toks[:k])
+            for eid in INDEX.by_key.get(("judge", surname(prefix)), []):
+                if court in memory.entities[eid]["courts"] and prefix in memory.entities[eid]["name_variants"]:
+                    return N.PERSON, "starts with a known judge's name in this court"
+        if len(core) >= 2 and (core[0], core[-1]) in FJC_NAMES:
+            return N.PERSON, "on the FJC judge list"
+        if r["_ctx"].get("structured") and N.PERSON in votes:
+            # one model says PERSON and the name is in a judge field of the case
+            return N.PERSON, "judge field of the case (structured)"
+        return None
+    if t == "counsel":
+        mname = counsel_core(clean)
+        for eid in INDEX.by_key.get(("counsel", surname(mname)), []):
+            e = memory.entities[eid]
+            if court in e["courts"] and entity_fits(mname, e, "counsel"):
+                return N.PERSON, "matches a known lawyer in this court"
+        if INDEX.by_key.get(("firm", normalize_entity_name(r["raw_name"], "firm"), N.org_parts(r["raw_name"])["office"])):
+            return N.ORG, "matches a known firm / office"
+        return None
+    if t == "party":
+        for eid in INDEX.by_key.get(("party", clean), []):
+            return (N.ORG if True in INDEX.ctx[eid]["is_org"] else N.PERSON), "matches a known party"
+        return None
+    if t == "firm":
+        if INDEX.by_key.get(("firm", clean, N.org_parts(r["raw_name"])["office"])):
+            return N.ORG, "matches a known firm / office"
+        return None
+    return None
+
+
+def gate_decide(r, file_judges=()):
+    """(label or None, how, votes). None = undecided (goes to gate_review.jsonl)."""
+    sent = r.get("_sent")
+    votes = GATE.votes_of(gate_name(r), sent[0] if sent else None)
+    if votes[0] is None:
+        return None, "no votes", votes
+    if votes[0] == votes[1]:
+        return votes[0], "both models agree", votes
+    known = gate_known(r, votes, file_judges)
+    if known:
+        return known[0], known[1], votes
+    if LLM_CFG:
+        lab = GATE.llm(gate_name(r), ROLE_WORD[r["entity_type"]], sent[0] if sent else None)
+        if lab:
+            return lab, "local LLM", votes
+    if r["entity_type"] == "judge" and N.PERSON not in votes:
+        # ORGANISATION vs NOT_ENTITY and no data says otherwise: neither model calls it a person, and a judge must be one
+        return (votes[0] if votes[0] != N.NOT else votes[1]), "neither model says PERSON", votes
+    return None, "undecided", votes
+
+
+def counsel_as_firm(r, recs):
+    """A counsel record the gate calls an ORGANISATION (an office) becomes a firm record of the same file."""
+    c = r["_ctx"]
+    raw = r["raw_name"]
+    for p in recs:
+        if p["entity_type"] == "party" and raw in p["_ctx"].get("counsel_raw", []):
+            p["_ctx"]["firm_raw"].append(raw)
+    return {"raw_name": raw, "clean_name": normalize_entity_name(raw, "firm"), "entity_type": "firm", "ucid": r["ucid"],
+            "court": r["court"], "_ctx": defaultdict(list, {
+                "addresses": list(c.get("addresses", [])), "phones": list(c.get("phones", [])),
+                "domains": sorted({email_domain(e) for e in c.get("emails", []) if email_domain(e)}),
+                "office": [N.org_parts(raw)["office"]],
+                "converted_from": ["counsel"], "gate": list(c.get("gate", []))})}
+
+
+def apply_gate(recs, stats):
+    """Decide every judge / counsel / party record of one file with the name gate. Returns the records to match."""
+    out = []
+    file_judges = []
+    # judge-field judges first, so docket names of the same case can be checked against them
+    order = sorted(range(len(recs)), key=lambda i: (not (recs[i]["entity_type"] == "judge" and recs[i]["_ctx"].get("structured")), i))
+    for i in order:
+        r = recs[i]
+        t = r["entity_type"]
+        doc = bool(r["_ctx"].get("document"))   # found by a model in free text (documents / generic JSON), not a field
+        if t not in ("judge", "counsel", "party") and not (t == "firm" and doc):
+            out.append(r)
+            continue
+        lab, how, votes = gate_decide(r, file_judges)
+        if t == "judge" and lab == N.PERSON and r["_ctx"].get("structured"):
+            file_judges.append(r["clean_name"])
+        r["_ctx"]["gate"] = [f"{lab or 'undecided'}: {how}"]
+        stats[f"gate {t}: {lab or 'undecided'} ({how})"] = stats.get(f"gate {t}: {lab or 'undecided'} ({how})", 0) + 1
+        if lab is None:
+            memory.gate_review.append({"entity_type": t, "raw_name": r["raw_name"], "ucid": r["ucid"], "court": r["court"],
+                                       "votes": {"spacy": votes[0], "probablepeople": votes[1]},
+                                       "sentence": (r.get("_sent") or [None])[0],
+                                       "kept_as": None if (t == "judge" or doc) else t})
+            if doc:
+                continue      # a model-found name the gate cannot decide is reviewed, not created
+        if t == "firm":
+            if lab != N.ORG:
+                memory.dropped.append(drop_row(r, f"name gate: document firm is {lab} ({how})", "gate", votes=votes))
+                continue
+            out.append(r)
+            continue
+        if t == "judge":
+            if lab != N.PERSON:
+                if lab is not None:
+                    memory.dropped.append(drop_row(r, f"name gate: judge is {lab} ({how})", "gate", votes=votes))
+                continue
+        elif t == "counsel":
+            if lab == N.NOT:
+                memory.dropped.append(drop_row(r, f"name gate: counsel is {lab} ({how})", "gate", votes=votes))
+                continue
+            if lab == N.ORG and RAWINFO_STAFF_RE.search(r["clean_name"]):
+                # an organisation named by a court-staff role (probation, pretrial services, clerk) is court staff
+                memory.dropped.append(drop_row(r, f"court staff: organisation named by a court-staff role ({how})", "gate",
+                                               votes=votes))
+                continue
+            if lab == N.ORG and GATE_CFG["counsel_organisation"]["value"] == "firm":
+                stats["counsel became firm / office"] = stats.get("counsel became firm / office", 0) + 1
+                out.append(counsel_as_firm(r, recs))
+                continue
+            if lab == N.ORG:
+                # setting "counsel": an office named as counsel stays a counsel mention, flagged as an organisation
+                r["_ctx"]["is_organisation"] = [True]
+                stats["counsel flagged as organisation"] = stats.get("counsel flagged as organisation", 0) + 1
+        elif t == "party":
+            if lab == N.NOT:
+                memory.dropped.append(drop_row(r, f"name gate: party is {lab} ({how})", "gate", votes=votes))
+                continue
+            r["_kind"] = lab if lab in (N.PERSON, N.ORG) else (votes[1] if votes[1] in (N.PERSON, N.ORG) else N.PERSON)
+        out.append(r)
+    pos = {id(r): k for k, r in enumerate(recs)}
+    return sorted(out, key=lambda r: pos.get(id(r), len(recs)))   # keep the file's extraction order
 
 
 def extract_mentions_from_json(json_content, filename):
@@ -1187,7 +1260,7 @@ def extract_mentions_from_json(json_content, filename):
         return [], [{"entity_type": None, "raw_name": None, "clean_name": None, "ucid": None, "court": None,
                      "field": "ucid", "reason": f"file has no ucid: {filename}", "stage": "extraction"}]
     court = data.get("court", "unknown")
-    extracted = []  # (raw_name, etype, context)
+    extracted = []  # (raw_name, etype, context[, sentence, (start, end)])
     drops = []
     base_rec = lambda raw, t: {"entity_type": t, "raw_name": str(raw).strip(), "clean_name": "", "ucid": ucid, "court": court}
 
@@ -1216,7 +1289,7 @@ def extract_mentions_from_json(json_content, filename):
                 continue
             info = counsel.get("entity_info", {}) or {}
             raw_info = info.get("raw_info") or ""
-            ri_staff = STAFF_RE.search(" ".join(re.sub(r"<[^>]+>|[^\w\s]", " ", raw_info.lower()).split()))
+            ri_staff = RAWINFO_STAFF_RE.search(" ".join(re.sub(r"<[^>]+>|[^\w\s]", " ", raw_info.lower()).split()))
             office = info.get("office_name")
             email = norm_email(info.get("email"))
             phone = norm_phone(info.get("phone"))
@@ -1237,6 +1310,7 @@ def extract_mentions_from_json(json_content, filename):
             if office and not office.isdigit():
                 extracted.append((office, "firm", {
                     "addresses": [addr], "phones": [phone], "domains": [email_domain(email)],
+                    "office": [N.org_parts(office)["office"]],
                 }))
                 p_ctx["firm_raw"].append(office.strip())
 
@@ -1247,18 +1321,24 @@ def extract_mentions_from_json(json_content, filename):
             for pattern in DOCKET_JUDGE_PATTERNS:
                 for mt in pattern.finditer(txt):
                     candidate = mt.group(1)
-                    cand_clean = candidate.strip().lower()
-                    if not any(stopword in cand_clean for stopword in NON_JUDGE_DOCKET_KEYWORDS):
-                        extracted.append((candidate.strip(), "judge", {"docket": [True],
-                                          "docket_title": [True] if DOCKET_TITLE_RE.search(mt.group(0)) else []}))
-                    else:
-                        drops.append(drop_row(base_rec(candidate, "judge"), "docket: non-judge keyword", "extraction",
-                                              "docket[].docket_text"))
+                    st = mt.start(1) + len(candidate) - len(candidate.lstrip())
+                    en = st + len(candidate.strip())
+                    a_, b_ = max(0, st - 200), min(len(txt), en + 200)   # the sentence window the NER model reads
+                    extracted.append((candidate.strip(), "judge", {"docket": [True],
+                                      "docket_title": [True] if DOCKET_TITLE_RE.search(mt.group(0)) else []},
+                                      txt[a_:b_], (st - a_, en - a_)))
 
-    # Convert to unique records per file (same dedup as v4_run.py; contexts of repeats are merged)
+    return finish_records(extracted, ucid, court, drops)
+
+
+def finish_records(extracted, ucid, court, drops):
+    """Unique records per file (contexts of repeats merged); the first sentence seen is kept for the name gate."""
+    base_rec = lambda raw, t: {"entity_type": t, "raw_name": str(raw).strip(), "clean_name": "", "ucid": ucid, "court": court}
     records = []
     seen = {}
-    for raw_name, etype, ctx in extracted:
+    for item in extracted:
+        raw_name, etype, ctx = item[:3]
+        sent = (item[3], item[4]) if len(item) > 3 and item[3] and item[4] else None
         clean = normalize_entity_name(raw_name, etype)
         if not clean:
             drops.append(drop_row(base_rec(raw_name, etype), "junk: empty after normalisation", "extraction",
@@ -1269,11 +1349,6 @@ def extract_mentions_from_json(json_content, filename):
             if trimmed != clean:
                 ctx = {**ctx, "trimmed_from": [clean]}
                 clean = trimmed
-            if judge_is_non_name(clean):
-                r_ = base_rec(raw_name, etype); r_["clean_name"] = clean
-                drops.append(drop_row(r_, "judge: non-name word", "extraction",
-                                      "docket[].docket_text" if ctx.get("docket") else None))
-                continue
             ctx = {**ctx, "titles": judge_titles(raw_name)}
         key = (raw_name, etype)
         if key not in seen:
@@ -1288,6 +1363,8 @@ def extract_mentions_from_json(json_content, filename):
             seen[key] = rec
             records.append(rec)
         rec = seen[key]
+        if sent and "_sent" not in rec:
+            rec["_sent"] = sent
         for f, vals in ctx.items():
             for v in vals:
                 if v and v not in rec["_ctx"][f]:
@@ -1296,10 +1373,38 @@ def extract_mentions_from_json(json_content, filename):
     for r in records:
         if r["entity_type"] == "party":
             r["_ctx"]["coparties"] = [p for p in party_names if p != r["clean_name"]]
-            # organisation / acronym decision needs the court's acronym set, so it is made at match time
-            # (party_org_decision); pass 1 only collects this name's initials for that set.
-            r["_ctx"]["batch_initials"] = batch_initials(r["raw_name"], r["clean_name"])
+            # organisation / acronym decision needs the gate and the court's acronym set, so it is made at match time
     return records, drops
+
+
+def extract_text_file(data, filename, kind):
+    """Document (OCR pages / blocks) or generic JSON: names found by the model, then the same records as dockets."""
+    global EXTRACTOR
+    if EXTRACTOR is None:
+        EXTRACTOR = READERS.Extractor(DOC_CFG, DOC_CACHE_FILE, DOC_MODEL, LLM_CFG)
+    ucid, court, extracted, reviews = READERS.read_text_file(data, filename, kind, EXTRACTOR, DOC_CFG)
+    memory.doc_review.extend(reviews)
+    records, drops = finish_records(extracted, ucid, court, [])
+    party_names = sorted({r["clean_name"] for r in records if r["entity_type"] == "party"})
+    for r in records:
+        if r["entity_type"] == "party":
+            r["_ctx"]["coparties"] = [p for p in party_names if p != r["clean_name"]]
+    return records, drops
+
+
+def extract_any(content, filename):
+    """Pick the reader from the file's structure (not its name)."""
+    try:
+        data = json.loads(content)
+    except Exception as ex:
+        return [], [{"entity_type": None, "raw_name": None, "clean_name": None, "ucid": None, "court": None,
+                     "field": "file", "reason": f"not valid JSON ({type(ex).__name__}): {filename}", "stage": "extraction"}], "invalid"
+    kind = READERS.file_kind(data)
+    if kind == "docket":
+        recs, drops = extract_mentions_from_json(content, filename)
+    else:
+        recs, drops = extract_text_file(data, filename, kind)
+    return recs, drops, kind
 
 
 def ingest_json_files(files_dict):
@@ -1337,32 +1442,41 @@ def ingest_json_files(files_dict):
         if fname in memory.state["processed_files"] and memory.state["processed_files"][fname] == checksum:
             todo.append((fname, checksum, None, None))
             continue
-        recs, drops = extract_mentions_from_json(content.decode("utf-8", errors="replace"), fname)
+        recs, drops, kind = extract_any(content.decode("utf-8", errors="replace"), fname)
+        stats[f"files read as {kind}"] = stats.get(f"files read as {kind}", 0) + 1
         for r in recs:
             if r["entity_type"] == "counsel":
                 INDEX.counsel_name_cases[counsel_core(r["clean_name"])].add(r["ucid"])
             if r["entity_type"] == "party":
                 INDEX.add_party_name_case(r["clean_name"], r["ucid"])
-                INDEX.add_org_initials(r["_ctx"], r["court"])
             elif r["entity_type"] == "judge":
                 INDEX.add_judge_first(r["clean_name"], r["court"])
         todo.append((fname, checksum, recs, drops))
+        if len(todo) % PROGRESS_EVERY == 0:
+            print(f"Reading: {len(todo)}/{total} files | {time.perf_counter() - t_start:.1f}s", flush=True)
 
-    # Type gate: Stage 1 for every new counsel / firm / party record; Stage 2 (model) once per undecided name, cached.
-    undecided = {}
+    # Name gate: two model votes per DISTINCT string (cached across runs), then party initials for the acronym rule
+    items = {}
     for _, _, recs, _ in todo:
         for r in recs or []:
+            if r["entity_type"] in ("judge", "counsel", "party") or (r["entity_type"] == "firm" and r["_ctx"].get("document")):
+                sent = r.get("_sent")
+                items.setdefault(N.NameGate.key(gate_name(r), sent[0] if sent else None),
+                                 (gate_name(r), sent[0] if sent else None, sent[1] if sent else None))
+    t_g = time.perf_counter()
+    print(f"Name gate: {len(items)} distinct strings in this batch, {sum(k not in GATE.cache for k in items)} new", flush=True)
+    stats["name_gate_new_strings"] = GATE.vote(items, progress=lambda msg: print(msg, flush=True))
+    stats["name_gate_sec"] = round(time.perf_counter() - t_g, 1)
+    print(f"Name gate: done | {stats['name_gate_sec']}s", flush=True)
+    for _, _, recs, _ in todo:
+        for r in recs or []:
+            if r["entity_type"] == "party":
+                s_, p_ = GATE.votes_of(r["raw_name"])
+                kind = s_ if s_ == p_ else p_
+                r["_ctx"]["batch_initials"] = org_batch_initials(r["raw_name"], r["clean_name"], kind)
+                INDEX.add_org_initials(r["_ctx"], r["court"])
             if r["entity_type"] in ("counsel", "firm", "party"):
                 r["_gate"] = type_gate_stage1(r)
-                if r["_gate"][0] == "undecided":
-                    k = type_cache_key(r)
-                    if k not in memory.type_cache:
-                        undecided[k] = r["raw_name"]
-    stats["type_gate_undecided_names_new"] = len(undecided)
-    if TYPE_MODEL == "gliner2" and undecided:
-        t_m = time.perf_counter()
-        stats["type_model_names_classified"] = classify_with_model(undecided)
-        stats["type_model_sec"] = round(time.perf_counter() - t_m, 1)
 
     # Pass 2: match file by file, in sorted name order.
     for done, (fname, checksum, raw_mentions, file_drops) in enumerate(todo, start=1):
@@ -1375,20 +1489,11 @@ def ingest_json_files(files_dict):
         kept = []
         for r in raw_mentions:
             gate = r.pop("_gate", None)
-            if gate:
-                decision, why = gate
-                if decision == "undecided":
-                    row = memory.type_cache.get(type_cache_key(r))
-                    if row and row["label"] in TYPE_MODEL_CFG["drop_labels"] and row["confidence"] >= TYPE_MODEL_CFG["min_confidence"]:
-                        memory.dropped.append(drop_row(r, f"stage2 {row['model']}: {row['label']} ({row['confidence']:.2f}); {why}", "stage2"))
-                        continue
-                    r["_ctx"]["type_gate"] = [f"kept: {why}; " + (f"model said {row['label']} ({row['confidence']:.2f})" if row else "no model answer")]
-                    stats["type_gate_undecided_kept"] = stats.get("type_gate_undecided_kept", 0) + 1
-                elif decision == "drop":
-                    memory.dropped.append(drop_row(r, why, "stage1"))
-                    continue
+            if gate and gate[0] == "drop":
+                memory.dropped.append(drop_row(r, gate[1], "stage1"))
+                continue
             kept.append(r)
-        raw_mentions = kept
+        raw_mentions = apply_gate(kept, stats)
         stats["mentions_extracted"] += len(raw_mentions)
 
         # mention IDs come from a counter, so a mention dropped later in this file leaves a gap instead of a reused ID
@@ -1420,7 +1525,8 @@ def ingest_json_files(files_dict):
                 if etype == "counsel":
                     c["firm_eids"] = sorted({eid_of[("firm", r)] for r in c.pop("firm_raw", []) if ("firm", r) in eid_of})
                 if etype == "party":
-                    c.update(party_org_decision(m_data["raw_name"], m_data["clean_name"], m_data["court"]))
+                    c.update(party_org_decision(m_data["raw_name"], m_data["clean_name"], m_data["court"],
+                                                m_data.pop("_kind", N.PERSON)))
                     cop = c.get("coparties", [])
                     c["coparties"] = [] if len(cop) > COPARTY_MAX_PARTIES_IN_CASE else [
                         p for p in cop if p not in GOV_PARTY_NAMES and not is_doe_entity(p)
@@ -1434,6 +1540,7 @@ def ingest_json_files(files_dict):
                     m_data["side"] = c.pop("side", [])
                 if etype == "counsel":
                     m_data["side"] = c.pop("party_side", [])
+                m_data.pop("_sent", None)
                 m_data["context"] = dict(c)
                 m_id = m_data["mention_id"]
 
@@ -1485,7 +1592,7 @@ def ingest_json_files(files_dict):
                         "entity_id": ent_id,
                         id_key: specific_id,
                         "entity_type": etype,
-                        "canonical_name": judge_display_name(m_data["raw_name"]) if etype == "judge" else m_data["raw_name"],
+                        "canonical_name": judge_display_name(m_data["raw_name"]) if etype == "judge" else N.squash(m_data["raw_name"]),
                         "normalized_name": m_data["clean_name"],
                         "name_variants": [m_data["clean_name"]],
                         "courts": [m_data["court"]],
@@ -1511,7 +1618,12 @@ def ingest_json_files(files_dict):
         memory.state["processed_files"][fname] = checksum
         report_progress(done)
 
+    print(f"End step: matching done | {time.perf_counter() - t_start:.1f}s", flush=True)
+    for m in memory.pending:
+        m.pop("_sent", None)
     resolve_pending(stats)
+    refresh_display_names()
+    print(f"End step: display names | {time.perf_counter() - t_start:.1f}s", flush=True)
     memory.save()
     stats["uncertain_pairs_logged"] = len(memory.uncertain) - n_uncertain_before
     for k_, v_ in sorted(DROPPED.items(), key=lambda kv: -kv[1]):
@@ -1524,6 +1636,32 @@ def ingest_json_files(files_dict):
         print(f" {k.replace("_", " ").capitalize():<25}: {v}")
     print("="*45, flush=True)
     return stats
+
+
+def refresh_display_names():
+    """canonical_name = the most complete variant rebuilt from the parser's components (no titles / prefixes / line
+    breaks). Persons: judges, counsel, person parties; organisations: firms and organisation parties. IDs never change."""
+    raws = defaultdict(set)
+    org = set()
+    for m in memory.mentions.values():
+        eid = m.get("entity_id")
+        if not eid:
+            continue
+        raw = m.get("raw_name") or ""
+        if m["entity_type"] == "judge":
+            raw = judge_display_name(raw)
+            if (m.get("context") or {}).get("trimmed_from"):
+                raw = " ".join(raw.split()[:len(m["clean_name"].split())])
+        raws[eid].add(raw)
+        if m["entity_type"] == "party" and (m.get("context") or {}).get("is_org"):
+            org.add(eid)
+    for eid, e in memory.entities.items():
+        if e.get("unresolved") or eid not in raws:
+            continue
+        kind = N.ORG if e["entity_type"] == "firm" or eid in org else N.PERSON
+        d = N.display_name(raws[eid], kind)
+        if d:
+            e["canonical_name"] = d
 
 
 def rebuild_index():
@@ -1561,14 +1699,18 @@ def collect_inputs(paths):
 
 
 def main():
-    global STORAGE_DIR, ENTITIES_FILE, MENTIONS_FILE, STATE_FILE, UNCERTAIN_FILE, DROPPED_FILE, TYPE_CACHE_FILE, PENDING_FILE
-    global TYPE_MODEL, memory
+    global STORAGE_DIR, ENTITIES_FILE, MENTIONS_FILE, STATE_FILE, UNCERTAIN_FILE, DROPPED_FILE, PENDING_FILE
+    global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, GATE, DOC_MODEL, LLM_CFG, memory
+    faulthandler.register(signal.SIGUSR1, all_threads=True)   # `kill -USR1 <pid>` prints where the run is
     ap = argparse.ArgumentParser(description="V4 incremental entity resolution, context-aware matching (local)")
     ap.add_argument("--input", nargs="+", required=True, help=".json file(s), folder(s) of .json files, or .zip")
     ap.add_argument("--output", required=True, help="folder for entities.jsonl, mentions.jsonl, state.json, uncertain_pairs.jsonl")
     ap.add_argument("--rules", default=None, help="rules file (default: v4_rules.yaml next to this script)")
-    ap.add_argument("--type-model", choices=["none", "gliner2"], default="none",
-                    help="Stage 2 of the type gate for names Stage 1 cannot decide (default: none = keep them)")
+    ap.add_argument("--llm", choices=["local"], default=None,
+                    help="local Ollama model (v4_rules.yaml name_gate.ollama) settles name-gate disagreements and, with "
+                         "--doc-model ollama, reads documents; answers are cached")
+    ap.add_argument("--doc-model", choices=["gliner2", "ollama"], default="gliner2",
+                    help="model that finds names in OCR documents and other JSON (default gliner2)")
     ap.add_argument("--order", choices=["name", "reverse"], default="name",
                     help="file order (default: sorted by name; 'reverse' is for order-sensitivity tests)")
     args = ap.parse_args()
@@ -1582,9 +1724,22 @@ def main():
     STATE_FILE = STORAGE_DIR / "state.json"
     UNCERTAIN_FILE = STORAGE_DIR / "uncertain_pairs.jsonl"
     DROPPED_FILE = STORAGE_DIR / "dropped_entities.jsonl"
-    TYPE_CACHE_FILE = STORAGE_DIR / "type_cache.jsonl"
     PENDING_FILE = STORAGE_DIR / "pending_judges.jsonl"
-    TYPE_MODEL = args.type_model
+    GATE_CACHE_FILE = STORAGE_DIR / "name_gate_cache.jsonl"
+    GATE_REVIEW_FILE = STORAGE_DIR / "gate_review.jsonl"
+    DOC_CACHE_FILE = STORAGE_DIR / "document_model_cache.jsonl"
+    DOC_REVIEW_FILE = STORAGE_DIR / "document_review.jsonl"
+    DOC_MODEL = args.doc_model
+    if args.llm == "local" or args.doc_model == "ollama":
+        oc = GATE_CFG["ollama"]
+        if N.ollama_available(oc["url"], oc["model"]):
+            LLM_CFG = dict(oc)
+        else:
+            print(f"WARNING: Ollama model {oc['model']} is not available at {oc['url']} - the LLM stays off "
+                  f"(install Ollama, run `ollama pull {oc['model']}`)", flush=True)
+            if args.doc_model == "ollama":
+                raise SystemExit("ERROR: --doc-model ollama needs Ollama")
+    GATE = N.NameGate(GATE_CACHE_FILE, GATE_CFG["spacy_model"], LLM_CFG)
 
     t0 = time.perf_counter()
     memory = MemoryManager(STORAGE_DIR)

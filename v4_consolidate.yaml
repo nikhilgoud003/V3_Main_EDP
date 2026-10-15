@@ -32,6 +32,10 @@ candidates:
     name cosine over labelled same-court positive pairs - and is stored in the model and model_card.md
   positive_quantile: 0.02
   chunk_rows: 1000      # rows per block when computing cosines (memory only, no effect on results)
+  dense_max_block: 8000 # blocks (one type in one court) up to this size compare every pair's cosine; larger blocks
+                        # (the largest party / counsel blocks) first pair IDs sharing a word or a word pair, then the exact cosine
+  max_key_df: 200       # a word / word pair shared by more IDs than this is too common to pair on (speed only; such
+                        # pairs can still be candidates through a shared case or a rarer shared word)
 
 fragments:
   source: user (Layer B request, label source c) - automatic fragments of confident full names. The counts below are

@@ -22,13 +22,19 @@ json/
 cases/
 txsd*/
 pilot*/
+Yolo*/
+yolo*/
+V4_*_test*/
+V4_run*/
+export*/
 
 # answer key (not public)
 answer_key*/
 eval_pilot*/
 
-# environments / caches
-.venv/
+# environments / caches / temp files from safe saving
+*.tmp
+.venv*/
 venv/
 __pycache__/
 *.pyc

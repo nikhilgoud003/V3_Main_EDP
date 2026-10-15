@@ -1,6 +1,6 @@
 """Input readers for Layer A, chosen by the file's STRUCTURE (never its name):
 
-  docket JSON    a dict with "ucid" and "parties" / "docket"        -> v4_run_ctx.extract_mentions_from_json
+  docket JSON    a dict with "ucid" and "parties" / "docket"        -> v3_run_ctx.extract_mentions_from_json
   OCR document   a dict with "pages": [{"blocks": [{"text", ...}]}]  -> read_text_files()
   anything else  any JSON                                            -> read_text_files() (every text field + its JSON path)
 
@@ -295,7 +295,7 @@ def join_blocks(blocks, gap_px, prose_words):
 
 def legal_part(name):
     """probablepeople finds a legal-form component (Inc., LLC, Pty Ltd ...) in the name: positive organisation evidence."""
-    from v4_names import pp_parse
+    from v3_names import pp_parse
     return any(lab == "CorporationLegalType" for _, lab in pp_parse(" ".join(name.split())))
 
 
@@ -362,7 +362,7 @@ def calibrate(scores_ok, grid, target, min_support):
 
 def read_text_files(items, extractor, cfg, gate, docket_roles, debug=None):
     """All document / generic files of a run at once.
-    items: [(filename, data, kind)]; gate: v4_names.NameGate (spaCy + probablepeople votes, cached);
+    items: [(filename, data, kind)]; gate: v3_names.NameGate (spaCy + probablepeople votes, cached);
     docket_roles: {ucid: {name key: entity type}} from structured docket data of the same case.
     Returns ({filename: (ucid, court, extracted, reviews)}, mentioned_only rows, report rows).
 

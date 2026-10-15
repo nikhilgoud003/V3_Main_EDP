@@ -1,35 +1,36 @@
 # V3_Main_EDP: entity resolution for court records
 
-> This repository holds the pipeline developed as V4 (Layer A, Layer B, document reader, Tentris knowledge graph). The older V3 pipeline is at https://github.com/nikhilgoud003/V3_overtime.
+> This repository holds the V3 pipeline (Layer A, Layer B, document reader, Tentris knowledge graph). It was developed under the name V4. The older pipeline that used to be called V3 is now V3_overtime: https://github.com/nikhilgoud003/V3_overtime.
 
-**About the name.** The repository is called V3_Main_EDP, but the code inside is the V4 pipeline, so it keeps V4 names:
-- the scripts are `v4_*.py`;
-- the knowledge-graph namespace is `v4:` (`http://scales-kg.org/v4#`).
-
-These names are part of the saved outputs and the graph IRIs, so they were not renamed.
+**About the name.**
+- This pipeline is **V3**. Until 2026-10-15 it was called V4.
+- The older pipeline that was called V3 is now **V3_overtime**: https://github.com/nikhilgoud003/V3_overtime.
+- The scripts are `v3_*.py`. The knowledge-graph namespace is `v3:` (`http://scales-kg.org/v3#`). Entity ID formats (SJ, SP, SC, SF) did not change.
+- Reports and folders in `~/nikhil_results` made before 2026-10-15 still say V4 (for example `V4_readme_check`, `V4_kg`, `v4_inc`). They were not renamed, so the source paths in this README still say V4.
+- A graph built before the rename uses `http://scales-kg.org/v4#`. Build it again with `v3_kg.py` to get `v3:` terms.
 
 **Contents:**
 
 | Path | What it is |
 |---|---|
-| `v4_run_ctx.py`, `v4_rules.yaml` | Layer A: incremental linking, and its rules |
-| `v4_consolidate.py`, `v4_consolidate.yaml`, `models/` | Layer B: learned consolidation, its settings, and the trained model with its model card |
-| `v4_names.py` | name gate, organisation normalisation, display names (shared) |
-| `v4_readers.py` | input readers: docket JSON, OCR documents, generic JSON |
-| `v4_kg.py` | RDF emitter and Tentris loader (knowledge graph) |
+| `v3_run_ctx.py`, `v3_rules.yaml` | Layer A: incremental linking, and its rules |
+| `v3_consolidate.py`, `v3_consolidate.yaml`, `models/` | Layer B: learned consolidation, its settings, and the trained model with its model card |
+| `v3_names.py` | name gate, organisation normalisation, display names (shared) |
+| `v3_readers.py` | input readers: docket JSON, OCR documents, generic JSON |
+| `v3_kg.py` | RDF emitter and Tentris loader (knowledge graph) |
 | `data/` | public reference data: FJC judge list, Census name files (see `data/README.md`) |
-| `test_ctx.py`, `test_consolidate.py`, `test_v4_new.py` | tests for Layer A, Layer B and the later V4 changes |
-| `v4_test_run.sh`, `v4_consolidate_run.sh` | full test procedures |
+| `test_ctx.py`, `test_consolidate.py`, `test_v3_new.py` | tests for Layer A, Layer B and the later changes |
+| `v3_test_run.sh`, `v3_consolidate_run.sh` | full test procedures |
 | `score.py`, `check_consolidated.py`, `doc_report.py` | scoring against the answer key, Layer B checks, document summary |
 
 **Quick start** (details in the sections below):
 
 ```bash
 source .venv/bin/activate
-python v4_run_ctx.py --input /path/to/case_json --output /path/to/run                      # Layer A
-python v4_consolidate.py --input /path/to/run --output /path/to/consolidated \
+python v3_run_ctx.py --input /path/to/case_json --output /path/to/run                      # Layer A
+python v3_consolidate.py --input /path/to/run --output /path/to/consolidated \
   --model models/model.joblib --export /path/to/export                                    # Layer B + export
-python v4_kg.py build --export /path/to/export --layer-b /path/to/consolidated \
+python v3_kg.py build --export /path/to/export --layer-b /path/to/consolidated \
   --store /path/to/kg/store --batch-id first                                              # knowledge graph
 ```
 
@@ -53,16 +54,16 @@ It can also read OCR output of court documents (YOLO page/block JSON). That part
 flowchart LR
     D[Docket JSON] --> A
     Y[YOLO OCR JSON] -.paused.-> A
-    A["Layer A<br/>v4_run_ctx.py<br/>fast incremental linking"] --> B["Layer B<br/>v4_consolidate.py<br/>learned merges"]
+    A["Layer A<br/>v3_run_ctx.py<br/>fast incremental linking"] --> B["Layer B<br/>v3_consolidate.py<br/>learned merges"]
     B --> E["--export<br/>entities.jsonl + mentions.jsonl"]
-    E --> K["v4_kg.py<br/>Tentris knowledge graph"]
+    E --> K["v3_kg.py<br/>Tentris knowledge graph"]
     B -- "redirects, related links" --> K
 ```
 
 - **Layer A** reads each file once and links each name to a saved ID, or makes a new ID.
 - **Layer B** looks at all IDs together and merges IDs that are the same real entity.
 - **Export** writes the final result as two files.
-- **v4_kg.py** turns the export into RDF and loads it into Tentris.
+- **v3_kg.py** turns the export into RDF and loads it into Tentris.
 
 ## 3. Project history
 
@@ -70,12 +71,12 @@ flowchart LR
 |---|---|---|---|
 | **V1** | The original SCALES code. Judges: a spaCy NER model on docket text, then matching to the FJC list. Counsel, firms and parties: separate scripts. | Slow: 2,088 s for 1,000 pilot files, almost all in judge NER and matching. Parties could not run: they need EDGAR data and a classifier module that do not exist. Hard-coded server paths, and a bug that stops the judge build step on every run. | Too slow, and not complete. |
 | **V2** | The rule-based `research_dev` pipeline. Reads only the header and party-record fields. | Misses judges named only in docket text (mostly magistrates). Drops two-word judge names. Puts the U.S. Attorney's Offices of 14 districts in one firm ID. | Fast, but finds about half of the judges. |
-| **V3** (now `V3_overtime`) | One unified incremental pipeline for judges, firms and parties. Rules, then embeddings (local Ollama + FAISS), then an optional local LLM (qwen) for hard pairs. RDF into Tentris. | Correct on the pilot, but too slow on a full court: 8 h 49 min for TXSD on a GPU machine. Messy judge list on TXSD. Many party IDs that mix different people. | Accurate, but too slow and too many wrong party merges at full-court size. |
-| **V4** (this repo) | Fast context-based linking (Layer A), then a learned merge step (Layer B), then a knowledge graph. | See section 11 for the problems found and fixed on the way. | — |
+| **V3_overtime** (the old V3) | One unified incremental pipeline for judges, firms and parties. Rules, then embeddings (local Ollama + FAISS), then an optional local LLM (qwen) for hard pairs. RDF into Tentris. | Correct on the pilot, but too slow on a full court: 8 h 49 min for TXSD on a GPU machine. Messy judge list on TXSD. Many party IDs that mix different people. | Accurate, but too slow and too many wrong party merges at full-court size. |
+| **V3** (this repo; developed as V4) | Fast context-based linking (Layer A), then a learned merge step (Layer B), then a knowledge graph. | See section 11 for the problems found and fixed on the way. | — |
 
 Numbers behind the table:
 
-| | V1 | V2 | V3 | V4 (this repo) |
+| | V1 | V2 | V3_overtime | V3 (this repo) |
 |---|---|---|---|---|
 | Pilot time, 1,000 files | 2,088 s | 10.4 s | 285 s (Mac), 216 s (GPU machine) | 13 s Layer A + 34 s Layer B |
 | Judge extraction F1 (pilot key) | 0.916 | 0.680 | 0.966 | 0.830 |
@@ -85,14 +86,14 @@ Numbers behind the table:
 | TXSD party IDs that mix different surnames | not run | 1,022 | 2,922 | not measured for this version |
 
 Sources:
-- V1, V2, V3 pilot: `v1_compare/REPORT.md` and `eval_pilot1000_scoring/REPORT.md`.
-- V2, V3 TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
-- V4 pilot scores: `V4_readme_check/score_readme.txt`. V4 pilot times: `V4_readme_check/logs/times.txt`.
-- V4 TXSD time: `V4_run_final/logs/03_add_txsd.log`.
+- V1, V2, V3_overtime pilot: `v1_compare/REPORT.md` and `eval_pilot1000_scoring/REPORT.md`.
+- V2, V3_overtime TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
+- V3 pilot scores: `V4_readme_check/score_readme.txt`. V3 pilot times: `V4_readme_check/logs/times.txt`.
+- V3 TXSD time: `V4_run_final/logs/03_add_txsd.log`.
 - V1's bug (`args['simple_outnames']` on an argparse Namespace) and missing data: `v1_compare/REPORT.md`.
-- V3's 195 junk or non-judge IDs out of 798 judge IDs on TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
+- V3_overtime's 195 junk or non-judge IDs out of 798 judge IDs on TXSD: `compare_txsd_v2_v3_claude/REPORT.md`.
 
-## 4. Layer A (`v4_run_ctx.py`)
+## 4. Layer A (`v3_run_ctx.py`)
 
 Layer A reads each file once. For each name it finds, it links the name to a saved ID or makes a new one.
 
@@ -130,7 +131,7 @@ Layer A reads each file once. For each name it finds, it links the name to a sav
 
 **Roles and sides.** Each party mention keeps its role from the docket (e.g. Plaintiff, Defendant) and a side: plaintiff-side, defendant-side or other.
 
-**Organisations.** One normalisation is shared by Layer A and Layer B (`v4_names.py`):
+**Organisations.** One normalisation is shared by Layer A and Layer B (`v3_names.py`):
 - "&", "and", "+", commas and periods count the same;
 - legal-form parts are removed using the parser's own labels (Inc., LLC);
 - text in parentheses, or after a final dash, goes to an "office" field.
@@ -141,7 +142,7 @@ Layer A reads each file once. For each name it finds, it links the name to a sav
 
 **Pilot result** (source: `V4_readme_check/logs/01_layerA.log`): 10,728 entities (judge 687, party 4,414, counsel 3,595, firm 2,032), 20,134 mentions, 267 uncertain pairs, 12.5 s.
 
-## 5. Layer B (`v4_consolidate.py`)
+## 5. Layer B (`v3_consolidate.py`)
 
 Layer B runs after Layer A. It merges IDs that belong to the same real person or organisation.
 
@@ -201,23 +202,23 @@ Known problems on those 7 files:
 - A real name with a low model score and no label pointing to it goes to review.
 - OCR debris that both models accept can still appear in `mentioned_only.jsonl`.
 
-## 7. Knowledge graph (`v4_kg.py`)
+## 7. Knowledge graph (`v3_kg.py`)
 
-`v4_kg.py` writes the export and the Layer B links as RDF and loads them into a Tentris store.
+`v3_kg.py` writes the export and the Layer B links as RDF and loads them into a Tentris store.
 
 **Tentris.** Version 1.1.0, at `~/.local/bin/tentris`, or set `TENTRIS_BIN`. The store is served on 127.0.0.1 only, on a free port chosen at start (never 9080). The port is written to `<store>/.tentris_port`.
 
 **Commands** (each was run on the pilot + 500 TXSD data):
 
 ```bash
-python v4_kg.py start  --store <store_folder> [--port N]
-python v4_kg.py stop   --store <store_folder>
-python v4_kg.py emit   --export <export_folder> --layer-b <layerB_folder> --out <file.nt>
-python v4_kg.py build  --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id <id>
-python v4_kg.py add    --export <export_folder> --layer-b <layerB_folder> --store <store_folder> --batch-id <id>
-python v4_kg.py counts --export <export_folder> --store <store_folder>
-python v4_kg.py query  --store <store_folder> [--example 1..5 | --sparql "<query>"]
-python v4_kg.py prove  --export-1 <E1> --layer-b-1 <B1> --export-2 <E2> --layer-b-2 <B2> --work <new_folder>
+python v3_kg.py start  --store <store_folder> [--port N]
+python v3_kg.py stop   --store <store_folder>
+python v3_kg.py emit   --export <export_folder> --layer-b <layerB_folder> --out <file.nt>
+python v3_kg.py build  --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id <id>
+python v3_kg.py add    --export <export_folder> --layer-b <layerB_folder> --store <store_folder> --batch-id <id>
+python v3_kg.py counts --export <export_folder> --store <store_folder>
+python v3_kg.py query  --store <store_folder> [--example 1..5 | --sparql "<query>"]
+python v3_kg.py prove  --export-1 <E1> --layer-b-1 <B1> --export-2 <E2> --layer-b-2 <B2> --work <new_folder>
 ```
 
 - `build` needs a new, empty store folder. It loads with `tentris load`, then serves.
@@ -228,8 +229,8 @@ python v4_kg.py prove  --export-1 <E1> --layer-b-1 <B1> --export-2 <E2> --layer-
 
 | Prefix | IRI | Used for |
 |---|---|---|
-| `pacer:` | `http://scales-kg.org/pacer#` | the SCALES PACER terms V3 used: `Judge`, `Party`, `LawFirm`, `JudgeMention`, `PartyMention`, `FirmMention`, `Case`, `hasName`, `hasSJID` / `hasSPID` / `hasSFID`, `hasCode`, `hasUcid`, `mentionsIn`, `resolvedTo`, `hasRole`, `hasCounselOffice` |
-| `v4:` | `http://scales-kg.org/v4#` | terms V4 adds: `Attorney`, `AttorneyMention`, `hasSCID`, `MergedRecord`, `mergedInto`, `officeLink`, `parentOrSubsidiaryLink`, `plaintiffParty` / `defendantParty` / `otherParty`, `hasJudge`, `hasAttorney`, `represents`, `isOrganisation`, side counts, `sourceDocument` |
+| `pacer:` | `http://scales-kg.org/pacer#` | the SCALES PACER terms V3_overtime used: `Judge`, `Party`, `LawFirm`, `JudgeMention`, `PartyMention`, `FirmMention`, `Case`, `hasName`, `hasSJID` / `hasSPID` / `hasSFID`, `hasCode`, `hasUcid`, `mentionsIn`, `resolvedTo`, `hasRole`, `hasCounselOffice` |
+| `v3:` | `http://scales-kg.org/v3#` | terms V3 adds: `Attorney`, `AttorneyMention`, `hasSCID`, `MergedRecord`, `mergedInto`, `officeLink`, `parentOrSubsidiaryLink`, `plaintiffParty` / `defendantParty` / `otherParty`, `hasJudge`, `hasAttorney`, `represents`, `isOrganisation`, side counts, `sourceDocument` |
 | `skos:` | `http://www.w3.org/2004/02/skos/core#` | `prefLabel` (display name), `altLabel` (name variants) |
 
 **IRI patterns:**
@@ -265,11 +266,11 @@ python v4_kg.py prove  --export-1 <E1> --layer-b-1 <B1> --export-2 <E2> --layer-
 
 **The Tentris web console.** Open `http://127.0.0.1:<port>/` in a browser, with the port from `<store>/.tentris_port`. It opens the "Tentris Admin Console". The Tentris binary contains a page called "SPARQL Editor", reached from inside the console. `/sparql-editor` cannot be opened directly (it returns 404). Only the console page loading (HTTP 200) was checked, not the editor in a browser.
 
-**Example queries.** Run them with `python v4_kg.py query --store <store_folder> --sparql "<query>"`, or paste them into the SPARQL Editor. Each was run on the pilot + 500 TXSD store. The result sizes are from `V4_readme_check/kg_queries/*.json`. Every query starts with:
+**Example queries.** Run them with `python v3_kg.py query --store <store_folder> --sparql "<query>"`, or paste them into the SPARQL Editor. Each was run on the pilot + 500 TXSD store. The result sizes are from `V4_readme_check/kg_queries/*.json`. Every query starts with:
 
 ```sparql
 PREFIX pacer: <http://scales-kg.org/pacer#>
-PREFIX v4:    <http://scales-kg.org/v4#>
+PREFIX v3:    <http://scales-kg.org/v3#>
 PREFIX skos:  <http://www.w3.org/2004/02/skos/core#>
 ```
 
@@ -284,32 +285,32 @@ PREFIX skos:  <http://www.w3.org/2004/02/skos/core#>
 3. Top 10 judges by number of cases (top judge: 469 cases):
    ```sparql
    SELECT ?judge ?name (COUNT(DISTINCT ?case) AS ?cases)
-   WHERE { ?case v4:hasJudge ?judge . ?judge pacer:hasName ?name }
+   WHERE { ?case v3:hasJudge ?judge . ?judge pacer:hasName ?name }
    GROUP BY ?judge ?name ORDER BY DESC(?cases) LIMIT 10
    ```
 4. All cases of one judge (469 rows for the top judge). Put a judge IRI from query 3 in place of `SJ000001`:
    ```sparql
-   SELECT ?ucid WHERE { ?case v4:hasJudge <http://scales-kg.org/id/judge/SJ000001> . ?case pacer:hasUcid ?ucid } ORDER BY ?ucid
+   SELECT ?ucid WHERE { ?case v3:hasJudge <http://scales-kg.org/id/judge/SJ000001> . ?case pacer:hasUcid ?ucid } ORDER BY ?ucid
    ```
 5. Parties in one case, by side. Put a ucid from query 4 in place of `<ucid>`:
    ```sparql
    SELECT ?side ?name WHERE {
      ?case pacer:hasUcid "<ucid>" .
-     { ?case v4:plaintiffParty ?p BIND("plaintiff" AS ?side) } UNION
-     { ?case v4:defendantParty ?p BIND("defendant" AS ?side) } UNION
-     { ?case v4:otherParty ?p BIND("other" AS ?side) }
+     { ?case v3:plaintiffParty ?p BIND("plaintiff" AS ?side) } UNION
+     { ?case v3:defendantParty ?p BIND("defendant" AS ?side) } UNION
+     { ?case v3:otherParty ?p BIND("other" AS ?side) }
      ?p pacer:hasName ?name } ORDER BY ?side ?name
    ```
 6. All lawyers for one party (337 rows for the party with the most lawyers):
    ```sparql
-   SELECT ?lawyer WHERE { ?a v4:represents <http://scales-kg.org/id/party/SP000002> . ?a pacer:hasName ?lawyer } ORDER BY ?lawyer
+   SELECT ?lawyer WHERE { ?a v3:represents <http://scales-kg.org/id/party/SP000002> . ?a pacer:hasName ?lawyer } ORDER BY ?lawyer
    ```
 7. Layer B merges (41 rows: 8 judge, 26 party, 7 counsel):
    ```sparql
-   SELECT ?old ?survivor ?name WHERE { ?old v4:mergedInto ?survivor . ?survivor pacer:hasName ?name } ORDER BY ?old
+   SELECT ?old ?survivor ?name WHERE { ?old v3:mergedInto ?survivor . ?survivor pacer:hasName ?name } ORDER BY ?old
    ```
 
-`python v4_kg.py query --store <store_folder>` runs five built-in examples. Each one picks its subject with an earlier query.
+`python v3_kg.py query --store <store_folder>` runs five built-in examples. Each one picks its subject with an earlier query.
 
 ## 8. Output files
 
@@ -374,22 +375,22 @@ python -c "import spacy, probablepeople; spacy.load('en_core_web_md'); print('ok
 
 - `requirements.txt` installs the spaCy model `en_core_web_md` 3.8.0 directly.
 - GLiNER2 (document reader only) downloads its model on first use.
-- Ollama is optional (`--llm local`). The model and URL are set in `v4_rules.yaml` under `name_gate.ollama`.
+- Ollama is optional (`--llm local`). The model and URL are set in `v3_rules.yaml` under `name_gate.ollama`.
 - Tentris 1.1.0 is a separate binary (section 7).
 
-**Pilot -> add 500 TXSD -> rerun -> all at once.** These are the steps of `v4_test_run.sh`:
+**Pilot -> add 500 TXSD -> rerun -> all at once.** These are the steps of `v3_test_run.sh`:
 
 ```bash
-python v4_run_ctx.py --input <pilot_folder> --output <run_folder>
-python v4_run_ctx.py --input <txsd500_folder> --output <run_folder>
-python v4_run_ctx.py --input <txsd500_folder> --output <run_folder>
-python v4_run_ctx.py --input <pilot_folder> <txsd500_folder> --output <oneshot_folder>
+python v3_run_ctx.py --input <pilot_folder> --output <run_folder>
+python v3_run_ctx.py --input <txsd500_folder> --output <run_folder>
+python v3_run_ctx.py --input <txsd500_folder> --output <run_folder>
+python v3_run_ctx.py --input <pilot_folder> <txsd500_folder> --output <oneshot_folder>
 ```
 
 Or all four steps with checks:
 
 ```bash
-PYTHON=$(which python) ./v4_test_run.sh <new_test_folder> <pilot_folder> <txsd500_folder>
+PYTHON=$(which python) ./v3_test_run.sh <new_test_folder> <pilot_folder> <txsd500_folder>
 ```
 
 Result on the current code (source: `V4_readme_check/test_run/timings.txt` and `log_*.txt`):
@@ -406,7 +407,7 @@ Note: the script still checks a file called `type_cache.jsonl`, which the curren
 **Layer B, then export:**
 
 ```bash
-python v4_consolidate.py --input <run_folder> --output <layerB_folder> --model models/model.joblib --export <export_folder>
+python v3_consolidate.py --input <run_folder> --output <layerB_folder> --model models/model.joblib --export <export_folder>
 ```
 
 Run it again after adding files: only new or changed IDs are scored, and old redirects are kept. Keep a copy of the Layer B folder per stage if you want to rebuild an earlier stage, because `related_links.jsonl` is rewritten on every run.
@@ -414,18 +415,18 @@ Run it again after adding files: only new or changed IDs are scored, and old red
 **Knowledge graph:**
 
 ```bash
-python v4_kg.py build --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id pilot
-python v4_kg.py add   --export <next_export_folder> --layer-b <next_layerB_folder> --store <store_folder> --batch-id next
+python v3_kg.py build --export <export_folder> --layer-b <layerB_folder> --store <new_store_folder> --batch-id pilot
+python v3_kg.py add   --export <next_export_folder> --layer-b <next_layerB_folder> --store <store_folder> --batch-id next
 tail -n 3 <store_parent_folder>/load_log.jsonl
 ```
 
 **Other options:**
 
 ```bash
-python v4_run_ctx.py --input <folder> --output <run_folder> --llm local
-python v4_run_ctx.py --input <folder> --output <run_folder> --doc-model ollama
-python v4_run_ctx.py --input <folder> --output <run_folder> --rules <rules_file>
-python v4_consolidate.py --input <run_folder> --output <new_model_folder> --key <answer_key_folder>
+python v3_run_ctx.py --input <folder> --output <run_folder> --llm local
+python v3_run_ctx.py --input <folder> --output <run_folder> --doc-model ollama
+python v3_run_ctx.py --input <folder> --output <run_folder> --rules <rules_file>
+python v3_consolidate.py --input <run_folder> --output <new_model_folder> --key <answer_key_folder>
 python doc_report.py <layer_A_output_folder> --names
 ```
 
@@ -445,23 +446,23 @@ python doc_report.py <layer_A_output_folder> --names
 **Unit tests** (source: `V4_readme_check/logs/test_a.log`, `test_b.log`, `test_new.log`):
 
 ```bash
-V4_PILOT_DIR=<pilot_folder> python test_ctx.py <new_folder_a>
+V3_PILOT_DIR=<pilot_folder> python test_ctx.py <new_folder_a>
 python test_consolidate.py <new_folder_b>
-V4_PILOT_DIR=<pilot_folder> python test_v4_new.py <new_folder_new>
+V3_PILOT_DIR=<pilot_folder> python test_v3_new.py <new_folder_new>
 ```
 
 | Suite | Checks | Result |
 |---|---|---|
 | `test_ctx.py` (Layer A; one check needs the 1,000 pilot files) | 49 | 49 passed |
 | `test_consolidate.py` (Layer B, synthetic data) | 13 | 13 passed |
-| `test_v4_new.py` (pending-judge scaling, name gate, organisation names, export, readers, safe saving, no real names in code) | 22 | 22 passed |
+| `test_v3_new.py` (pending-judge scaling, name gate, organisation names, export, readers, safe saving, no real names in code) | 22 | 22 passed |
 
-Full procedures: `v4_test_run.sh` (section 9) and `v4_consolidate_run.sh <test_folder>` (Layer B on the folder made by `v4_test_run.sh`).
+Full procedures: `v3_test_run.sh` (section 9) and `v3_consolidate_run.sh <test_folder>` (Layer B on the folder made by `v3_test_run.sh`).
 
 **Scoring.** `score.py` scores a run against the answer key:
 
 ```bash
-python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out <score.json>
+python score.py --key <answer_key_folder> --v3dir V3=<layer_A_run_folder> --out <score.json>
 ```
 
 **The answer key is not in the repo.** It covers 200 pilot files and was made by one reviewer following written rules (source: `eval_pilot1000_scoring/REPORT.md`). P = precision, R = recall. Extraction = the right name in the right file. Resolution = pairs of mentions with the same ID.
@@ -480,7 +481,7 @@ python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out 
 
 **Earlier systems on the same key** (F1; sources: `v1_compare/REPORT.md`, `eval_pilot1000_scoring/REPORT.md`):
 
-| Type | Score | V1 | V2 | V3 bulk | V3 with qwen | V4 now |
+| Type | Score | V1 | V2 | V3_overtime bulk | V3_overtime with qwen | V3 now |
 |---|---|---|---|---|---|---|
 | judge | extraction | 0.916 | 0.680 | 0.966 | 0.970 | 0.830 |
 | judge | resolution | 0.985 | 1.000 | 0.999 | 0.999 | 1.000 |
@@ -492,7 +493,7 @@ python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out 
 ## 11. Lessons learned
 
 **1. The party F1 collapse.**
-- What happened: one V4 version linked a party across cases only with evidence (shared counsel, firm or co-party). Party resolution F1 fell from 0.890 to 0.282 (recall 0.164). 1,427 of the 1,968 lost pairs (73%) were the government party: its 54 mentions in the key files got 50 IDs. (source: `v4_inc/REPORT_ctx.md`)
+- What happened: one earlier version linked a party across cases only with evidence (shared counsel, firm or co-party). Party resolution F1 fell from 0.890 to 0.282 (recall 0.164). 1,427 of the 1,968 lost pairs (73%) were the government party: its 54 mentions in the key files got 50 IDs. (source: `v4_inc/REPORT_ctx.md`)
 - Fix: the government party ("United States", "USA" …) folds to one ID, and organisation parties with the same normalised name share one ID. Party resolution F1 went back up to 0.973. (source: `v4_inc/REPORT_ctx2.md`)
 
 **2. The docket-judge rule that wiped out magistrates.**
@@ -505,11 +506,11 @@ python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out 
 
 **4. The "Corp." recall drop.**
 - What happened: organisation names used to lose a word list of legal forms (inc, corp, corporation, co, company …). Now they lose only the parts the parser labels as a legal type. The parser labels "Corp.", "Corporation" and "Company" as organisation words, not legal forms. So "Acme Corp." and "Acme Corporation" stay two IDs. Party resolution recall fell from 0.952 to 0.874. (sources: `v4_inc/score_final.txt` and `V4_readme_check/score_readme.txt`)
-- Fix: **not made; still open.** A setting exists: `organisations.legal_form_rule: legal_type_and_trailing_org_type` in `v4_rules.yaml`. It also removes one final organisation word. On the pilot it gives party resolution P 0.981 / R 0.930 / F1 0.955, against 0.984 / 0.874 / 0.926 with the default. (source: `V4_readme_check/score_readme.txt`, rows CorpA / CorpB) The default was not changed. Only Layer A reads this setting.
+- Fix: **not made; still open.** A setting exists: `organisations.legal_form_rule: legal_type_and_trailing_org_type` in `v3_rules.yaml`. It also removes one final organisation word. On the pilot it gives party resolution P 0.981 / R 0.930 / F1 0.955, against 0.984 / 0.874 / 0.926 with the default. (source: `V4_readme_check/score_readme.txt`, rows CorpA / CorpB) The default was not changed. Only Layer A reads this setting.
 
 ## 12. Design rules
 
-- **No hard-coded names or keyword lists** for deciding what is a name. Use pretrained models, public reference data (FJC, Census) and statistics from the data. Every list and number that remains is in `v4_rules.yaml` or `v4_consolidate.yaml`, with a `source:` note. The tests check that no real names appear in the code or settings.
+- **No hard-coded names or keyword lists** for deciding what is a name. Use pretrained models, public reference data (FJC, Census) and statistics from the data. Every list and number that remains is in `v3_rules.yaml` or `v3_consolidate.yaml`, with a `source:` note. The tests check that no real names appear in the code or settings.
 - **Old IDs never change.** Incremental runs only add. Layer B only adds redirects, and the surviving ID is the oldest one.
 - **Precision first.** A merge needs evidence. Layer B merges automatically only where held-out precision is ≥ 0.98.
 - **Unsure cases go to review files**, not into the data: `uncertain_pairs.jsonl`, `gate_review.jsonl`, `pending_judges.jsonl`, `review_queue.jsonl`, `document_review.jsonl`.
@@ -541,13 +542,13 @@ python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out 
 .
 ├── README.md
 ├── requirements.txt
-├── v4_run_ctx.py            Layer A
-├── v4_rules.yaml            Layer A rules and settings (with source notes)
-├── v4_consolidate.py        Layer B
-├── v4_consolidate.yaml      Layer B settings (with source notes)
-├── v4_names.py              name gate, organisation normalisation, display names
-├── v4_readers.py            docket / OCR document / generic JSON readers
-├── v4_kg.py                 knowledge graph (RDF + Tentris)
+├── v3_run_ctx.py            Layer A
+├── v3_rules.yaml            Layer A rules and settings (with source notes)
+├── v3_consolidate.py        Layer B
+├── v3_consolidate.yaml      Layer B settings (with source notes)
+├── v3_names.py              name gate, organisation normalisation, display names
+├── v3_readers.py            docket / OCR document / generic JSON readers
+├── v3_kg.py                 knowledge graph (RDF + Tentris)
 ├── models/
 │   ├── model.joblib         trained Layer B model
 │   └── model_card.md        features, thresholds, training pairs
@@ -557,9 +558,9 @@ python score.py --key <answer_key_folder> --v4dir V4=<layer_A_run_folder> --out 
 │   └── census1990_dist.*    Census 1990 name files
 ├── test_ctx.py              Layer A tests
 ├── test_consolidate.py      Layer B tests
-├── test_v4_new.py           tests for the later V4 changes
-├── v4_test_run.sh           Layer A procedure: first -> add -> rerun -> all at once
-├── v4_consolidate_run.sh    Layer B procedure
+├── test_v3_new.py           tests for the later changes
+├── v3_test_run.sh           Layer A procedure: first -> add -> rerun -> all at once
+├── v3_consolidate_run.sh    Layer B procedure
 ├── score.py                 scoring against the answer key
 ├── check_consolidated.py    Layer B checks
 └── doc_report.py            per-document summary

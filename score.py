@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Score runs against the pilot answer key folder (--key or $V4_ANSWER_KEY; the key is not in the repo).
+"""Score runs against the pilot answer key folder (--key or $V3_ANSWER_KEY; the key is not in the repo).
 
 Usage:
-  python3 score.py --v2 DIR --v3 DIR [--key DIR] [--out score.json]
+  python3 score.py --v2 DIR --v3ot DIR [--key DIR] [--out score.json]
 
 Both systems are first read into one format: rows of
   (entity_type, file, name, system_id)
   V2: judge_disambiguation.jsonl (SJID), party_disambiguation.jsonl (SPID_Strong, listed
       parties only, entity_source == "party"), firm_disambiguation.jsonl (sfid_strong; a row
       with id -1 has no ID and is its own singleton).
-  V3: mentions.jsonl + entities.jsonl (entity id); party_alias mentions left out, like V2's
+  V3_overtime: mentions.jsonl + entities.jsonl (entity id); party_alias mentions left out, like V2's
       alias rows, because the key lists only the parties themselves.
 Only rows in the 200 key files count.
 
-Name matching (identical for V2 and V3): a system name matches a key entity of the same type
+Name matching (identical for V2 and V3_overtime): a system name matches a key entity of the same type
 in the same file when, after normalization (accents, case, punctuation, "&"->"and", leading
 titles such as Judge/Magistrate/Honorable, trailing legal forms such as Inc/LLC/LLP/PC,
 "U.S."/"United States" -> "us"), it is equal to one of the key entity's names, or
@@ -102,7 +102,7 @@ def load_v2(d):
     return rows
 
 
-def load_v3(d):
+def load_v3ot(d):
     d = Path(d)
     m2e = {}
     for line in open(d / "entities.jsonl"):
@@ -116,7 +116,7 @@ def load_v3(d):
         if t not in ("judge", "party", "firm") or m.get("docket_source") == "party_alias":
             continue
         sid = m2e.get(m["mention_id"]) or f"noid:{m['mention_id']}"
-        rows.append((t, m.get("source_file") or ucid_to_file(m["ucid"]), m.get("raw_name") or "", f"V3:{sid}"))
+        rows.append((t, m.get("source_file") or ucid_to_file(m["ucid"]), m.get("raw_name") or "", f"V3ot:{sid}"))
     return rows
 
 
@@ -142,8 +142,8 @@ def load_v1(d):
     return rows
 
 
-def load_v4(fp):
-    """V4 entities file (no mentions file): one row per (entity, ucid, name variant).
+def load_v3file(fp):
+    """V3 entities file (notebook-era output, no mentions file): one row per (entity, ucid, name variant).
     Exact here because no entity has both >1 name variant and >1 ucid. Counsel not scored."""
     rows = []
     for line in open(fp):
@@ -157,12 +157,12 @@ def load_v4(fp):
         names = e.get("name_variants") or [e.get("normalized_name") or e.get("canonical_name") or ""]
         for u in e.get("ucids") or []:
             for n in names:
-                rows.append((t, ucid_to_file(u), n, f"V4:{sid}"))
+                rows.append((t, ucid_to_file(u), n, f"V3file:{sid}"))
     return rows
 
 
-def load_v4dir(d):
-    """V4 run folder (v4_run.py / v4_run_ctx.py): mentions.jsonl rows carry entity_id. Counsel not scored."""
+def load_v3dir(d):
+    """V3 run folder (v4_run.py / v3_run_ctx.py): mentions.jsonl rows carry entity_id. Counsel not scored."""
     rows = []
     for line in open(Path(d) / "mentions.jsonl"):
         if not line.strip():
@@ -173,7 +173,7 @@ def load_v4dir(d):
             continue
         # mentions in an "unresolved" judge record are not one identity: score each as its own singleton
         sid = f"noid:{m['mention_id']}" if m.get("unresolved") else m["entity_id"]
-        rows.append((t, ucid_to_file(m["ucid"]), m.get("raw_name") or "", f"V4dir:{sid}"))
+        rows.append((t, ucid_to_file(m["ucid"]), m.get("raw_name") or "", f"V3dir:{sid}"))
     return rows
 
 
@@ -311,13 +311,13 @@ def bootstrap(prep, files, reps=1000, seed=42):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--v2", help="V2 run folder (optional)")
-    ap.add_argument("--v3", help="V3 run folder (optional)")
-    ap.add_argument("--v3q", help="second V3 run (e.g. --qwen), scored as label V3q")
+    ap.add_argument("--v3ot", help="V3_overtime run folder (optional)")
+    ap.add_argument("--v3otq", help="second V3_overtime run (e.g. --qwen), scored as label V3_overtime_q")
     ap.add_argument("--v1", help="V1 run folder (judges + firms only)")
-    ap.add_argument("--v4", help="V4 entities .jsonl file")
-    ap.add_argument("--v4dir", action="append", default=[], help="LABEL=DIR of a V4 run folder with mentions.jsonl (repeatable)")
-    ap.add_argument("--key", default=os.environ.get("V4_ANSWER_KEY"), required=not os.environ.get("V4_ANSWER_KEY"),
-                    help="answer key folder (default: $V4_ANSWER_KEY)")
+    ap.add_argument("--v3file", help="V3 entities .jsonl file (notebook-era output)")
+    ap.add_argument("--v3dir", action="append", default=[], help="LABEL=DIR of a V3 run folder with mentions.jsonl (repeatable)")
+    ap.add_argument("--key", default=os.environ.get("V3_ANSWER_KEY"), required=not os.environ.get("V3_ANSWER_KEY"),
+                    help="answer key folder (default: $V3_ANSWER_KEY)")
     ap.add_argument("--out", default="score.json")
     ap.add_argument("--reps", type=int, default=1000)
     a = ap.parse_args()
@@ -328,17 +328,17 @@ def main():
     systems = []
     if a.v2:
         systems.append(("V2", load_v2(a.v2), ("judge", "party", "firm")))
-    if a.v3:
-        systems.append(("V3", load_v3(a.v3), ("judge", "party", "firm")))
-    if a.v3q:
-        systems.append(("V3q", load_v3(a.v3q), ("judge", "party", "firm")))
+    if a.v3ot:
+        systems.append(("V3_overtime", load_v3ot(a.v3ot), ("judge", "party", "firm")))
+    if a.v3otq:
+        systems.append(("V3_overtime_q", load_v3ot(a.v3otq), ("judge", "party", "firm")))
     if a.v1:
         systems.insert(0, ("V1", load_v1(a.v1), ("judge", "firm")))
-    if a.v4:
-        systems.append(("V4", load_v4(a.v4), ("judge", "party", "firm")))
-    for spec in a.v4dir:
+    if a.v3file:
+        systems.append(("V3file", load_v3file(a.v3file), ("judge", "party", "firm")))
+    for spec in a.v3dir:
         label, _, d = spec.partition("=")
-        systems.append((label, load_v4dir(d), ("judge", "party", "firm")))
+        systems.append((label, load_v3dir(d), ("judge", "party", "firm")))
     for label, rows, types in systems:
         out[label] = {}
         for t in types:

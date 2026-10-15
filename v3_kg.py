@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""V4 knowledge graph: RDF from the V4 export (+ Layer B redirects and related links) into a Tentris store.
+"""V3 knowledge graph: RDF from the V3 export (+ Layer B redirects and related links) into a Tentris store.
 
-Vocabulary: the SCALES PACER terms V3 used (pacer: = http://scales-kg.org/pacer#, ids under http://scales-kg.org/id/<kind>/<id>,
-skos: names). Terms V4 adds live in a separate namespace v4: (http://scales-kg.org/v4#):
-  v4:Attorney / v4:AttorneyMention / v4:hasSCID      counsel (V3 emitted no counsel)
-  v4:mergedInto, v4:MergedRecord                     Layer B merge links (old ID -> surviving ID)
-  v4:officeLink, v4:parentOrSubsidiaryLink            Layer B related organisations
-  v4:plaintiffParty / v4:defendantParty / v4:otherParty   side of a party in one case
-  v4:hasJudge, v4:hasAttorney, v4:represents         case-judge, case-attorney, attorney-party links
-  v4:isOrganisation                                  the organisation flag of parties and counsel
-  v4:plaintiffSideCount / v4:defendantSideCount / v4:otherSideCount, v4:sourceDocument, v4:UnresolvedJudgeRecord
+Vocabulary: the SCALES PACER terms V3_overtime used (pacer: = http://scales-kg.org/pacer#, ids under http://scales-kg.org/id/<kind>/<id>,
+skos: names). Terms V3 adds live in a separate namespace v3: (http://scales-kg.org/v3#):
+  v3:Attorney / v3:AttorneyMention / v3:hasSCID      counsel (V3_overtime emitted no counsel)
+  v3:mergedInto, v3:MergedRecord                     Layer B merge links (old ID -> surviving ID)
+  v3:officeLink, v3:parentOrSubsidiaryLink            Layer B related organisations
+  v3:plaintiffParty / v3:defendantParty / v3:otherParty   side of a party in one case
+  v3:hasJudge, v3:hasAttorney, v3:represents         case-judge, case-attorney, attorney-party links
+  v3:isOrganisation                                  the organisation flag of parties and counsel
+  v3:plaintiffSideCount / v3:defendantSideCount / v3:otherSideCount, v3:sourceDocument, v3:UnresolvedJudgeRecord
 
 Incremental loads are exact: the new export's triples are compared with the last loaded state; removed triples (a changed
 display name, a merged-away ID) are deleted with SPARQL DELETE DATA and new ones added with INSERT DATA on the live store.
@@ -17,14 +17,14 @@ Every load is recorded in <data>/load_log.jsonl. The store is served on 127.0.0.
 (never 9080), written to <store>/.tentris_port.
 
 Usage (all paths are arguments; nothing about the server is stored in the repo):
-  python v4_kg.py start  --store DIR [--port N]
-  python v4_kg.py stop   --store DIR
-  python v4_kg.py emit   --export DIR --layer-b DIR --out FILE.nt
-  python v4_kg.py build  --export DIR --layer-b DIR --store DIR [--batch-id ID]     (new, empty store; served after)
-  python v4_kg.py add    --export DIR --layer-b DIR --store DIR [--batch-id ID]     (delta into the live store)
-  python v4_kg.py query  --store DIR [--example N | --sparql TEXT]
-  python v4_kg.py counts --export DIR --store DIR
-  python v4_kg.py prove  --export-1 DIR --export-2 DIR --layer-b-1 DIR --layer-b-2 DIR --work DIR
+  python v3_kg.py start  --store DIR [--port N]
+  python v3_kg.py stop   --store DIR
+  python v3_kg.py emit   --export DIR --layer-b DIR --out FILE.nt
+  python v3_kg.py build  --export DIR --layer-b DIR --store DIR [--batch-id ID]     (new, empty store; served after)
+  python v3_kg.py add    --export DIR --layer-b DIR --store DIR [--batch-id ID]     (delta into the live store)
+  python v3_kg.py query  --store DIR [--example N | --sparql TEXT]
+  python v3_kg.py counts --export DIR --store DIR
+  python v3_kg.py prove  --export-1 DIR --export-2 DIR --layer-b-1 DIR --layer-b-2 DIR --work DIR
 """
 import argparse
 import collections
@@ -45,23 +45,23 @@ from pathlib import Path
 
 PACER = "http://scales-kg.org/pacer#"
 ID = "http://scales-kg.org/id/"
-V4 = "http://scales-kg.org/v4#"
+V3 = "http://scales-kg.org/v3#"
 SKOS = "http://www.w3.org/2004/02/skos/core#"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 XSD = "http://www.w3.org/2001/XMLSchema#"
 
 KIND = {"SJ": "judge", "SP": "party", "SC": "counsel", "SF": "firm", "SJU": "judge_unresolved"}
-CLASS = {"judge": PACER + "Judge", "party": PACER + "Party", "firm": PACER + "LawFirm", "counsel": V4 + "Attorney",
-         "judge_unresolved": V4 + "UnresolvedJudgeRecord"}
-ID_PRED = {"judge": PACER + "hasSJID", "party": PACER + "hasSPID", "firm": PACER + "hasSFID", "counsel": V4 + "hasSCID",
-           "judge_unresolved": V4 + "hasRecordId"}
+CLASS = {"judge": PACER + "Judge", "party": PACER + "Party", "firm": PACER + "LawFirm", "counsel": V3 + "Attorney",
+         "judge_unresolved": V3 + "UnresolvedJudgeRecord"}
+ID_PRED = {"judge": PACER + "hasSJID", "party": PACER + "hasSPID", "firm": PACER + "hasSFID", "counsel": V3 + "hasSCID",
+           "judge_unresolved": V3 + "hasRecordId"}
 MENTION_CLASS = {"judge": PACER + "JudgeMention", "party": PACER + "PartyMention", "firm": PACER + "FirmMention",
-                 "counsel": V4 + "AttorneyMention"}
+                 "counsel": V3 + "AttorneyMention"}
 SIDE = {"plaintiff-side": "plaintiff", "defendant-side": "defendant"}
-CASE_PARTY = {"plaintiff": V4 + "plaintiffParty", "defendant": V4 + "defendantParty", "other": V4 + "otherParty"}
-RELATION = {"office": V4 + "officeLink", "parent_or_subsidiary": V4 + "parentOrSubsidiaryLink"}
-ENTITY_LINKS = {PACER + "resolvedTo", V4 + "hasJudge", V4 + "hasAttorney", PACER + "hasCounselOffice", V4 + "represents",
-                V4 + "mergedInto", V4 + "officeLink", V4 + "parentOrSubsidiaryLink", PACER + "mentionsIn",
+CASE_PARTY = {"plaintiff": V3 + "plaintiffParty", "defendant": V3 + "defendantParty", "other": V3 + "otherParty"}
+RELATION = {"office": V3 + "officeLink", "parent_or_subsidiary": V3 + "parentOrSubsidiaryLink"}
+ENTITY_LINKS = {PACER + "resolvedTo", V3 + "hasJudge", V3 + "hasAttorney", PACER + "hasCounselOffice", V3 + "represents",
+                V3 + "mergedInto", V3 + "officeLink", V3 + "parentOrSubsidiaryLink", PACER + "mentionsIn",
                 *CASE_PARTY.values()}
 TENTRIS = os.environ.get("TENTRIS_BIN", str(Path.home() / ".local/bin/tentris"))
 FORBIDDEN_PORTS = {9080}
@@ -78,7 +78,7 @@ def lit(s, dtype=None):
 
 
 def entity_iri(eid):
-    """ent_SJ_000123 -> <http://scales-kg.org/id/judge/SJ000123> (the V3 id pattern)."""
+    """ent_SJ_000123 -> <http://scales-kg.org/id/judge/SJ000123> (the V3_overtime id pattern)."""
     m = re.match(r"ent_([A-Z]+)_(\d+)$", eid or "")
     if not m or m.group(1) not in KIND:
         raise ValueError(f"unexpected entity id {eid!r}")
@@ -109,7 +109,7 @@ def collapse(redirects):
 
 # ---------------------------------------------------------------- emit
 def emit(export_dir, layer_b_dir):
-    """Set of N-Triples lines for one V4 export + its Layer B folder."""
+    """Set of N-Triples lines for one V3 export + its Layer B folder."""
     export_dir, layer_b_dir = Path(export_dir), Path(layer_b_dir)
     ents = read_jsonl(export_dir / "entities.jsonl")
     ments = read_jsonl(export_dir / "mentions.jsonl")
@@ -134,11 +134,11 @@ def emit(export_dir, layer_b_dir):
         for c in e.get("courts") or []:
             add(u, PACER + "hasCode", lit(c))
         if "is_organisation" in e:
-            add(u, V4 + "isOrganisation", lit("true" if e["is_organisation"] else "false", "boolean"))
+            add(u, V3 + "isOrganisation", lit("true" if e["is_organisation"] else "false", "boolean"))
         if kind == "party":
             for k, p in (("plaintiff_side", "plaintiffSideCount"), ("defendant_side", "defendantSideCount"),
                          ("other_side", "otherSideCount")):
-                add(u, V4 + p, lit(int(e.get(k) or 0), "integer"))
+                add(u, V3 + p, lit(int(e.get(k) or 0), "integer"))
     for m in ments:
         if not m.get("entity_id") or not m.get("mention_id"):
             continue    # pending docket judge names have no entity yet
@@ -158,28 +158,28 @@ def emit(export_dir, layer_b_dir):
         add(mu, PACER + "resolvedTo", iri(known[eid]))
         ctx = m.get("context") or {}
         for f in ctx.get("document_file") or []:
-            add(mu, V4 + "sourceDocument", lit(f))
+            add(mu, V3 + "sourceDocument", lit(f))
         if t == "judge":
-            add(cu, V4 + "hasJudge", iri(known[eid]))
+            add(cu, V3 + "hasJudge", iri(known[eid]))
         elif t == "party":
             sides = [SIDE.get(s, "other") for s in (m.get("side") or [])] or ["other"]
             for sd in sorted(set(sides)):
                 add(mu, PACER + "hasRole", lit(sd))
                 add(cu, CASE_PARTY[sd], iri(known[eid]))
         elif t == "counsel":
-            add(cu, V4 + "hasAttorney", iri(known[eid]))
+            add(cu, V3 + "hasAttorney", iri(known[eid]))
             for pid in ctx.get("party_eids") or []:
                 if fin(pid) in known:
-                    add(known[eid], V4 + "represents", iri(known[fin(pid)]))
+                    add(known[eid], V3 + "represents", iri(known[fin(pid)]))
         elif t == "firm":
             add(cu, PACER + "hasCounselOffice", iri(known[eid]))
     for old, new in sorted(final_of.items()):
         if new not in known:
             continue
         kind, ou, local = entity_iri(old)
-        add(ou, RDF_TYPE, iri(V4 + "MergedRecord"))
+        add(ou, RDF_TYPE, iri(V3 + "MergedRecord"))
         add(ou, ID_PRED[kind], lit(local))
-        add(ou, V4 + "mergedInto", iri(known[new]))
+        add(ou, V3 + "mergedInto", iri(known[new]))
     for r in links:
         a, b = fin(r["id_a"]), fin(r["id_b"])
         if a in known and b in known and r.get("relation") in RELATION:
@@ -397,7 +397,7 @@ COUNT_CLASS = {"judge": "Judge", "party": "Party", "firm": "LawFirm", "counsel":
 def graph_counts(store):
     out = {}
     for t, c in COUNT_CLASS.items():
-        ns = V4 if t == "counsel" else PACER
+        ns = V3 if t == "counsel" else PACER
         out[t] = int(rows(sparql(store, f"SELECT (COUNT(DISTINCT ?e) AS ?n) WHERE {{ ?e a <{ns}{c}> }}"))[0]["n"])
     return out
 
@@ -407,38 +407,38 @@ def export_counts(export_dir):
                                     if not e.get("unresolved")))
 
 
-P = f"PREFIX pacer: <{PACER}> PREFIX v4: <{V4}> PREFIX skos: <{SKOS}> "
+P = f"PREFIX pacer: <{PACER}> PREFIX v3: <{V3}> PREFIX skos: <{SKOS}> "
 
 
 def examples(store):
     """Five example queries; the entity each one is about is picked by an earlier query (most cases / most lawyers...)."""
     out = []
-    top_judge = rows(sparql(store, P + "SELECT ?j (COUNT(DISTINCT ?c) AS ?n) WHERE { ?c v4:hasJudge ?j } GROUP BY ?j ORDER BY DESC(?n) LIMIT 1"))
+    top_judge = rows(sparql(store, P + "SELECT ?j (COUNT(DISTINCT ?c) AS ?n) WHERE { ?c v3:hasJudge ?j } GROUP BY ?j ORDER BY DESC(?n) LIMIT 1"))
     if top_judge:
         j = top_judge[0]["j"]
-        q = P + f"SELECT ?name ?ucid WHERE {{ <{j}> pacer:hasName ?name . ?c v4:hasJudge <{j}> . ?c pacer:hasUcid ?ucid }} ORDER BY ?ucid"
+        q = P + f"SELECT ?name ?ucid WHERE {{ <{j}> pacer:hasName ?name . ?c v3:hasJudge <{j}> . ?c pacer:hasUcid ?ucid }} ORDER BY ?ucid"
         r = rows(sparql(store, q))
         out.append({"query": "1. all cases of one judge (the judge with most cases)", "sparql": q, "n_results": len(r), "sample": r[:5]})
-    top_party = rows(sparql(store, P + "SELECT ?p (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a v4:represents ?p } GROUP BY ?p ORDER BY DESC(?n) LIMIT 1"))
+    top_party = rows(sparql(store, P + "SELECT ?p (COUNT(DISTINCT ?a) AS ?n) WHERE { ?a v3:represents ?p } GROUP BY ?p ORDER BY DESC(?n) LIMIT 1"))
     if top_party:
         pt = top_party[0]["p"]
-        q = P + f"SELECT ?party ?lawyer WHERE {{ <{pt}> pacer:hasName ?party . ?a v4:represents <{pt}> . ?a pacer:hasName ?lawyer }} ORDER BY ?lawyer"
+        q = P + f"SELECT ?party ?lawyer WHERE {{ <{pt}> pacer:hasName ?party . ?a v3:represents <{pt}> . ?a pacer:hasName ?lawyer }} ORDER BY ?lawyer"
         r = rows(sparql(store, q))
         out.append({"query": "2. all lawyers for one party (the party with most lawyers)", "sparql": q, "n_results": len(r), "sample": r[:5]})
-    q = P + "SELECT ?old ?survivor ?name WHERE { ?m v4:mergedInto ?e . ?m pacer:hasSJID ?old . ?e pacer:hasSJID ?survivor . ?e pacer:hasName ?name } ORDER BY ?old"
+    q = P + "SELECT ?old ?survivor ?name WHERE { ?m v3:mergedInto ?e . ?m pacer:hasSJID ?old . ?e pacer:hasSJID ?survivor . ?e pacer:hasName ?name } ORDER BY ?old"
     r = rows(sparql(store, q))
-    q2 = P + "SELECT (COUNT(?m) AS ?n) WHERE { ?m v4:mergedInto ?e }"
+    q2 = P + "SELECT (COUNT(?m) AS ?n) WHERE { ?m v3:mergedInto ?e }"
     out.append({"query": "3. entities merged by Layer B (judges listed; all types counted)", "sparql": q, "n_results": len(r),
                 "all_merged_records": int(rows(sparql(store, q2))[0]["n"]), "sample": r[:5]})
-    top_firm = rows(sparql(store, P + "SELECT ?f (COUNT(?o) AS ?n) WHERE { { ?f v4:officeLink ?o } UNION { ?o v4:officeLink ?f } ?f a pacer:LawFirm } GROUP BY ?f ORDER BY DESC(?n) LIMIT 1"))
+    top_firm = rows(sparql(store, P + "SELECT ?f (COUNT(?o) AS ?n) WHERE { { ?f v3:officeLink ?o } UNION { ?o v3:officeLink ?f } ?f a pacer:LawFirm } GROUP BY ?f ORDER BY DESC(?n) LIMIT 1"))
     if top_firm:
         f_ = top_firm[0]["f"]
-        q = P + (f"SELECT ?firm ?office WHERE {{ <{f_}> pacer:hasName ?firm . {{ <{f_}> v4:officeLink ?o }} UNION {{ ?o v4:officeLink <{f_}> }} "
+        q = P + (f"SELECT ?firm ?office WHERE {{ <{f_}> pacer:hasName ?firm . {{ <{f_}> v3:officeLink ?o }} UNION {{ ?o v3:officeLink <{f_}> }} "
                  f"?o pacer:hasName ?office }} ORDER BY ?office")
         r = rows(sparql(store, q))
         out.append({"query": "4. one firm's offices (the firm with most office links)", "sparql": q, "n_results": len(r), "sample": r[:5]})
-    q = P + ("SELECT ?side (COUNT(*) AS ?links) WHERE { { ?c v4:plaintiffParty ?p BIND(\"plaintiff\" AS ?side) } UNION "
-             "{ ?c v4:defendantParty ?p BIND(\"defendant\" AS ?side) } UNION { ?c v4:otherParty ?p BIND(\"other\" AS ?side) } } GROUP BY ?side ORDER BY ?side")
+    q = P + ("SELECT ?side (COUNT(*) AS ?links) WHERE { { ?c v3:plaintiffParty ?p BIND(\"plaintiff\" AS ?side) } UNION "
+             "{ ?c v3:defendantParty ?p BIND(\"defendant\" AS ?side) } UNION { ?c v3:otherParty ?p BIND(\"other\" AS ?side) } } GROUP BY ?side ORDER BY ?side")
     r = rows(sparql(store, q))
     out.append({"query": "5. plaintiff vs defendant (case-party links by side)", "sparql": q, "n_results": len(r), "sample": r})
     return out
@@ -487,7 +487,7 @@ def prove(a):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="V4 knowledge graph (Tentris)")
+    ap = argparse.ArgumentParser(description="V3 knowledge graph (Tentris)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("start", "stop", "build", "add", "query", "counts", "emit", "prove"):
         s = sub.add_parser(name)

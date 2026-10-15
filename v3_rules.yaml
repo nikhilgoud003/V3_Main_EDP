@@ -1,4 +1,4 @@
-# v4_rules.yaml: every word list, pattern and threshold used by v4_run_ctx.py.
+# v3_rules.yaml: every word list, pattern and threshold used by v3_run_ctx.py.
 # Each entry has a `source:` note. Sources:
 #   notebook   = the Colab notebook "V4 (1).ipynb" (cells 5-8), copied unchanged
 #   user       = an explicit instruction from the user (date / step noted)
@@ -19,7 +19,7 @@ entity_types:
 # ---------------------------------------------------------------- extraction
 docket_judge_patterns:
   source: 'notebook (DOCKET_JUDGE_PATTERNS, cell 5) for the first two; the last three are general phrases added in step 6 (user -
-    "before ... Judge X", "referred to Magistrate Judge X", "signed/ordered by Judge X"). V3 configs/judges.yaml was read: it finds
+    "before ... Judge X", "referred to Magistrate Judge X", "signed/ordered by Judge X"). V3_overtime configs/judges.yaml was read: it finds
     docket judges with spaCy NER and uses regexes only to reject non-judges (probation officers, court reporters, clerks), which the
     non_judge_docket_keywords and judges.non_name_words lists cover here.'
   patterns:
@@ -313,7 +313,7 @@ type_gate:
     pattern: |-
       \bbar\s*(?:no|number|#|id)\b|\bstate\s+bar\b
 
-# ---------------------------------------------------------------- name gate (v4_names.NameGate)
+# ---------------------------------------------------------------- name gate (v3_names.NameGate)
 name_gate:
   source: 'user (finish job, fix 2) - PERSON / ORGANISATION / NOT_ENTITY from two pretrained models, run once per distinct string
     and cached in name_gate_cache.jsonl: spaCy NER (en_core_web_md; on the docket sentence when there is one; an entity must
@@ -335,7 +335,7 @@ name_gate:
     model: "qwen2.5:7b"
     timeout_s: 60
 
-# ---------------------------------------------------------------- document / generic JSON readers (v4_readers.py)
+# ---------------------------------------------------------------- document / generic JSON readers (v3_readers.py)
 documents:
   source: 'user (finish job, fix 7) - names in OCR documents and other JSON are found by GLiNER2 (fastino/gliner2-base-v1) with
     these label descriptions, once per distinct text block (document_model_cache.jsonl). A name below min_entity_confidence goes
@@ -466,6 +466,6 @@ removed_unused:
     - type_gate.court_staff_phrases for names (replaced by the name gate; kept only as rawinfo_staff_phrases for roles)
     - type_gate.model / undecided_min_cases (GLiNER2 Stage 2; replaced by the name gate)
     - corp_suffix_words, organisations.legal_forms / abbreviations / collapse_single_letters / division (replaced by
-      v4_names.org_parts - probablepeople CorporationLegalType, office field from parentheses or a final dash)
+      v3_names.org_parts - probablepeople CorporationLegalType, office field from parentheses or a final dash)
     - COMMON_NAMES (notebook's old Rule 4 list; the context matcher never used it)
     - ORG_WORDS (replaced by org_party_words in ctx2)

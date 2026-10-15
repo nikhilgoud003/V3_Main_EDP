@@ -7,4 +7,4 @@
 | `census1990_dist.female.first.txt` | same as above | same source, `dist.female.first` |
 | `census1990_dist.all.last.txt` | Layer A (a word is first-name-like when it is more frequent as a first name than as a surname) | same source, `dist.all.last` |
 
-The files are unchanged copies of the downloads. Paths are set in `v4_rules.yaml` (Layer A) and `v4_consolidate.yaml` (Layer B), relative to those files.
+The files are unchanged copies of the downloads. Paths are set in `v3_rules.yaml` (Layer A) and `v3_consolidate.yaml` (Layer B), relative to those files.

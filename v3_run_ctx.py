@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V4 incremental entity resolution with CONTEXT-AWARE matching (local).
+"""V3 incremental entity resolution with CONTEXT-AWARE matching (local).
 
 A copy of v4_run.py. Unchanged: extraction (which names become mentions), normalization,
 ID minting, output files, and the incremental behaviour (processed files skipped by
@@ -23,7 +23,7 @@ Outputs in --output: entities.jsonl, mentions.jsonl (each mention also carries i
 state.json, uncertain_pairs.jsonl.
 
 Usage:
-  python v4_run_ctx.py --input PATH [PATH ...] --output DIR
+  python v3_run_ctx.py --input PATH [PATH ...] --output DIR
 """
 
 import argparse
@@ -39,14 +39,14 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
-# --- RULES: every word list, pattern and threshold comes from v4_rules.yaml (see the `source:` notes there) ---
+# --- RULES: every word list, pattern and threshold comes from v3_rules.yaml (see the `source:` notes there) ---
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import v4_names as N  # noqa: E402  (shared name gate / organisation normalisation / display names)
-import v4_readers as READERS  # noqa: E402  (document + generic JSON readers)
+import v3_names as N  # noqa: E402  (shared name gate / organisation normalisation / display names)
+import v3_readers as READERS  # noqa: E402  (document + generic JSON readers)
 
-RULES_FILE = Path(__file__).resolve().parent / "v4_rules.yaml"
+RULES_FILE = Path(__file__).resolve().parent / "v3_rules.yaml"
 RULES = {}
 
 
@@ -97,7 +97,7 @@ def load_first_name_like(male, female, surnames):
 
 
 def load_rules(path=None):
-    """Load v4_rules.yaml and build the module-level lists, sets and compiled patterns."""
+    """Load v3_rules.yaml and build the module-level lists, sets and compiled patterns."""
     global RULES, RULES_FILE, EXTRACTION_CONFIG, DOCKET_JUDGE_PATTERNS, GATE_CFG, DOC_CFG, RAWINFO_STAFF_RE
     global RARE_MAX_CASES, RARE_PERSON_MIN_TOKENS, COPARTY_MAX_CASES, COPARTY_MAX_PARTIES_IN_CASE, PROGRESS_EVERY
     global WEBMAIL_DOMAINS, NAME_SUFFIXES, COUNSEL_TAG_TOKENS, GOV_PARTY_NAMES, GOV_NOT_IF_CONTAINS
@@ -202,8 +202,8 @@ DOC_REVIEW_FILE = None
 MENTIONED_FILE = None
 DOC_REPORT_FILE = None
 QUIET_UNCERTAIN = False   # set while re-checking pending judges, so uncertain pairs are not logged twice
-GATE = None        # v4_names.NameGate, created in main()
-EXTRACTOR = None   # v4_readers.Extractor, created on the first document / generic file
+GATE = None        # v3_names.NameGate, created in main()
+EXTRACTOR = None   # v3_readers.Extractor, created on the first document / generic file
 DOC_MODEL = "gliner2"
 LLM_CFG = None     # local Ollama settings when --llm local is given
 FIELD_OF = {"party": "parties[].name", "counsel": "parties[].counsel[].name",
@@ -260,7 +260,7 @@ class MemoryManager:
                     setattr(self, attr, [json.loads(l) for l in f if l.strip()])
         if self.mentions and not all("context" in m for m in self.mentions.values()):
             raise SystemExit("ERROR: this output folder was made by v4_run.py (mentions have no context). "
-                             "Use a new --output folder for v4_run_ctx.py.")
+                             "Use a new --output folder for v3_run_ctx.py.")
         print(f"Memory Loaded: {len(self.entities)} entities, {len(self.mentions)} mentions, "
               f"{len(self.state['processed_files'])} processed files.", flush=True)
 
@@ -303,7 +303,7 @@ class MemoryManager:
 
 memory = None  # created in main() once the output folder is known
 
-# --- 3. NORMALIZATION (patterns from v4_rules.yaml) ---
+# --- 3. NORMALIZATION (patterns from v3_rules.yaml) ---
 def clean_text_base(text):
     if not text:
         return ""
@@ -323,7 +323,7 @@ def normalize_entity_name(raw_name, entity_type):
     if not base:
         return ""
     if entity_type in ["firm", "party"]:
-        # one organisation normalisation for both layers (v4_names.org_parts): &/and/+, punctuation and line breaks
+        # one organisation normalisation for both layers (v3_names.org_parts): &/and/+, punctuation and line breaks
         # treated alike, legal forms removed with the parser's own components, office text moved out
         return N.org_parts(raw_name)["core"] or base
     return base
@@ -544,7 +544,7 @@ def is_placeholder_party(clean):
     return bool(is_doe_entity(clean) or PLACEHOLDER_RE.search(clean))
 
 
-# --- Step 4: organisation keys and acronyms (normalisation and the office field come from v4_names) ---
+# --- Step 4: organisation keys and acronyms (normalisation and the office field come from v3_names) ---
 def is_acronym(raw_part):
     t = str(raw_part).strip().replace(".", "")
     return t.isalpha() and t.isupper() and ACR_MIN <= len(t) <= ACR_MAX and " " not in t
@@ -1085,8 +1085,8 @@ def drop_row(rec, reason, stage, field=None, votes=None):
 
 def type_gate_stage1(rec):
     """('keep' | 'drop', reason) for counsel / firm / party records from structural signals: no letters, a placeholder
-    from v4_rules.yaml, the counsel record's raw_info naming a court-staff role with no email. Whether the string is a
-    person, an organisation or not an entity is decided by the name gate (v4_names.NameGate)."""
+    from v3_rules.yaml, the counsel record's raw_info naming a court-staff role with no email. Whether the string is a
+    person, an organisation or not an entity is decided by the name gate (v3_names.NameGate)."""
     t, ctx = rec["entity_type"], rec["_ctx"]
     clean = counsel_core(rec["clean_name"]) if t == "counsel" else rec["clean_name"]
     if not JUNK_MUST_CONTAIN.search(rec["clean_name"]):
@@ -1102,7 +1102,7 @@ def type_gate_stage1(rec):
     return "keep", "default"
 
 
-# --- the name gate (v4_names.NameGate): PERSON / ORGANISATION / NOT_ENTITY ---
+# --- the name gate (v3_names.NameGate): PERSON / ORGANISATION / NOT_ENTITY ---
 ROLE_WORD = {"judge": "judge", "counsel": "lawyer (counsel)", "party": "party", "firm": "law firm or office"}
 
 
@@ -1758,12 +1758,12 @@ def main():
     global STORAGE_DIR, ENTITIES_FILE, MENTIONS_FILE, STATE_FILE, UNCERTAIN_FILE, DROPPED_FILE, PENDING_FILE
     global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, MENTIONED_FILE, DOC_REPORT_FILE, GATE, DOC_MODEL, LLM_CFG, memory
     faulthandler.register(signal.SIGUSR1, all_threads=True)   # `kill -USR1 <pid>` prints where the run is
-    ap = argparse.ArgumentParser(description="V4 incremental entity resolution, context-aware matching (local)")
+    ap = argparse.ArgumentParser(description="V3 incremental entity resolution, context-aware matching (local)")
     ap.add_argument("--input", nargs="+", required=True, help=".json file(s), folder(s) of .json files, or .zip")
     ap.add_argument("--output", required=True, help="folder for entities.jsonl, mentions.jsonl, state.json, uncertain_pairs.jsonl")
-    ap.add_argument("--rules", default=None, help="rules file (default: v4_rules.yaml next to this script)")
+    ap.add_argument("--rules", default=None, help="rules file (default: v3_rules.yaml next to this script)")
     ap.add_argument("--llm", choices=["local"], default=None,
-                    help="local Ollama model (v4_rules.yaml name_gate.ollama) settles name-gate disagreements and, with "
+                    help="local Ollama model (v3_rules.yaml name_gate.ollama) settles name-gate disagreements and, with "
                          "--doc-model ollama, reads documents; answers are cached")
     ap.add_argument("--doc-model", choices=["gliner2", "ollama"], default="gliner2",
                     help="model that finds names in OCR documents and other JSON (default gliner2)")

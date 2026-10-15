@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for v4_run_ctx.py. Writes only under ./tests_ctx/ (must not exist yet).
+"""Tests for v3_run_ctx.py. Writes only under ./tests_ctx/ (must not exist yet).
 
   1. "J Smith" judge and "John Smith" judge in the same court -> one ID
   2. "J Smith" party vs "John Smith" judge -> two IDs
@@ -16,9 +16,9 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT = HERE / "v4_run_ctx.py"
-# Test 5 needs a folder of 1,000 real PACER case files; set V4_PILOT_DIR to run it (skipped otherwise).
-PILOT = Path(os.environ["V4_PILOT_DIR"]).expanduser() if os.environ.get("V4_PILOT_DIR") else None
+SCRIPT = HERE / "v3_run_ctx.py"
+# Test 5 needs a folder of 1,000 real PACER case files; set V3_PILOT_DIR to run it (skipped otherwise).
+PILOT = Path(os.environ["V3_PILOT_DIR"]).expanduser() if os.environ.get("V3_PILOT_DIR") else None
 T = HERE / (sys.argv[1] if len(sys.argv) > 1 else "tests_ctx")  # test folder (must not exist)
 results = []
 
@@ -165,13 +165,13 @@ h, f_, w = ids_for(m, "counsel", "Jared R Frost-DOJ"), ids_for(m, "counsel", "Jo
 check("8. counsel '-DOJ' tag: Frost (2 cases, same email) one ID; Frost, Dale, Oster three IDs",
       len(h) == 1 and len({*h, *f_, *w}) == 3, f"Frost {h}, Dale {f_}, Oster {w}")
 
-# --- test 9 (step 1): behaviour comes from v4_rules.yaml ---
+# --- test 9 (step 1): behaviour comes from v3_rules.yaml ---
 import yaml
 write_cases(T / "in_rules", [
     case("txsd;;1:16-cr-00001", "txsd", parties=[("USA", [("Ann Lee", info("Lee LLP", "1 Main St, Houston, TX 77002", "713-555-0101", "alee@lee.example.com"))])]),
     case("txsd;;1:16-cr-00002", "txsd", parties=[("USA", [("Bob Kim", info("Kim PC", "9 Elm St, Houston, TX 77002", "713-555-0202", "bkim@kim.example.com"))])]),
 ])
-rules = yaml.safe_load(open(HERE / "v4_rules.yaml"))
+rules = yaml.safe_load(open(HERE / "v3_rules.yaml"))
 rules["government_party_names"]["names"] = [n for n in rules["government_party_names"]["names"] if n != "usa"]
 custom = T / "rules_without_usa.yaml"
 custom.write_text(yaml.safe_dump(rules, sort_keys=False, allow_unicode=True))
@@ -456,7 +456,7 @@ def judge_groups(d):
 check("17d. the same files in two batches vs one batch give the same judges", judge_groups(T / "out_b_one") == judge_groups(T / "out_b_two"),
       f"one {judge_groups(T / 'out_b_one')} | two {judge_groups(T / 'out_b_two')}")
 import importlib.util
-spec = importlib.util.spec_from_file_location("v4m", SCRIPT); V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
+spec = importlib.util.spec_from_file_location("v3m", SCRIPT); V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
 rec = {"entity_type": "counsel", "raw_name": "Federal Public Defender", "clean_name": "federal public defender", "_ctx": collections.defaultdict(list)}
 for i in range(30):
     V.INDEX.counsel_name_cases["federal public defender"].add(f"c{i}")
@@ -478,9 +478,9 @@ check("18. first-name join: 'Bea' joins the only Bea judge in its case; 'Ann' wi
       len(bea) == 1 and not any(x["raw_name"] == "Ann" for x in m.values()) and any(p["raw_name"] == "Ann" for p in pend18),
       f"Bea {bea}, Ann pending {[p['raw_name'] for p in pend18]}")
 
-# --- test 5: incremental 800 + 200 on the pilot (needs V4_PILOT_DIR) ---
+# --- test 5: incremental 800 + 200 on the pilot (needs V3_PILOT_DIR) ---
 if PILOT is None:
-    print("SKIP  5a-5d. incremental 800 + 200 (set V4_PILOT_DIR to a folder of 1,000 PACER JSON files)")
+    print("SKIP  5a-5d. incremental 800 + 200 (set V3_PILOT_DIR to a folder of 1,000 PACER JSON files)")
     print(f"\n{sum(ok for _, ok in results)}/{len(results)} passed (test 5 skipped)")
     sys.exit(0 if all(ok for _, ok in results) else 1)
 names = sorted(p.name for p in PILOT.glob("*.json"))

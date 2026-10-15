@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-data checks for a Layer B output (names appear here because this is a check, not code or config).
 
-Usage: python check_consolidated.py <V4 run folder> <Layer B output folder>   -> prints and writes <output>/checks.md
+Usage: python check_consolidated.py <V3 run folder> <Layer B output folder>   -> prints and writes <output>/checks.md
 """
 import collections
 import json
@@ -9,10 +9,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import v4_consolidate as V
+import v3_consolidate as V
 
 run_dir, lb_dir = Path(sys.argv[1]).expanduser(), Path(sys.argv[2]).expanduser()
-cfg = V.load_config(V.HERE / "v4_consolidate.yaml")
+cfg = V.load_config(V.HERE / "v3_consolidate.yaml")
 nm = V.Names(cfg)
 ents = {e["entity_id"]: e for e in V.read_jsonl(run_dir / "entities.jsonl")}
 final = {m["layer_a_id"]: m["entity_id"] for m in V.read_jsonl(lb_dir / "mentions_resolved.jsonl")}

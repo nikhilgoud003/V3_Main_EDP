@@ -1,12 +1,12 @@
-# Layer B (v4_consolidate.py) settings. Every number has a source note.
+# Layer B (v3_consolidate.py) settings. Every number has a source note.
 # No person, agency or court names here.
 
 reference:
   source: user (Layer B request) - the label sources; read only
   answer_key_dir: ""   # answer key folder (answer_key_detail.csv + work/sample200.txt, used by score.py); not in the repo.
-                       # Give it with --key or the V4_ANSWER_KEY environment variable; without it training uses FJC + fragments only
+                       # Give it with --key or the V3_ANSWER_KEY environment variable; without it training uses FJC + fragments only
   fjc_list: data/judges_fjc.csv                       # relative to this file; FJC Biographical Directory export
-  layer_a_rules: v4_rules.yaml                        # read only: Layer A's placeholder rule (doe_pattern, placeholder_party);
+  layer_a_rules: v3_rules.yaml                        # read only: Layer A's placeholder rule (doe_pattern, placeholder_party);
                                                       # placeholder party IDs are never consolidated, as in Layer A
 
 names:

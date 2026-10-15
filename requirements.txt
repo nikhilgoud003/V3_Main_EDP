@@ -1,4 +1,4 @@
-# Exact versions used to build and test V4 (Python 3.13.1; probablepeople and its python-crfsuite build install fine on 3.13).
+# Exact versions used to build and test V3 (Python 3.13.1; probablepeople and its python-crfsuite build install fine on 3.13).
 PyYAML==6.0.3
 RapidFuzz==3.14.6
 numpy==2.5.4
@@ -15,5 +15,5 @@ gliner2==2.1.0
 torch==2.14.1
 transformers==5.19.0
 tokenizers==0.23.3
-# knowledge graph (v4_kg.py): output validation; the Tentris server itself is a separate binary
+# knowledge graph (v3_kg.py): output validation; the Tentris server itself is a separate binary
 rdflib==7.6.0

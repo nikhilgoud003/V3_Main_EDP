@@ -106,7 +106,7 @@ Held-out results at T_high (by kind and by label source):
 | org_shared_phone | -0.400 | -0.0000 |
 | org_shared_address | +0.128 | -0.0000 |
 
-Feature meanings are in the FEATURES list at the top of v4_consolidate.py.
+Feature meanings are in the FEATURES list at the top of v3_consolidate.py.
 
 ## Fixed constraints (the only hand rules)
 

@@ -1,8 +1,8 @@
 #!/bin/bash
 # Layer A test procedure: first files -> add new files -> rerun the new files (must change nothing) -> all files at once.
-# Usage: v4_test_run.sh <test folder (new)> <first case-JSON folder> <second case-JSON folder>
+# Usage: v3_test_run.sh <test folder (new)> <first case-JSON folder> <second case-JSON folder>
 #   <test folder>/run              incremental result (first + second)
-#   <test folder>/run_after_pilot  state after the first folder (used by v4_consolidate_run.sh)
+#   <test folder>/run_after_pilot  state after the first folder (used by v3_consolidate_run.sh)
 #   <test folder>/run_oneshot      all files in one run
 #   <test folder>/timings.txt      times and the rerun check
 # Set PYTHON to choose the interpreter (default python3).
@@ -10,7 +10,7 @@ set -u
 if [ $# -ne 3 ]; then echo "usage: $0 <new test folder> <first json folder> <second json folder>"; exit 1; fi
 H=$(cd "$(dirname "$0")" && pwd)
 PY="${PYTHON:-python3}"
-S="$H/v4_run_ctx.py"
+S="$H/v3_run_ctx.py"
 FIRST=$(cd "$2" && pwd); SECOND=$(cd "$3" && pwd)
 mkdir -p "$1" && cd "$1" || exit 1
 for d in run run_after_pilot run_before_rerun run_oneshot all_inputs; do [ -e $d ] && { echo "$d exists"; exit 1; }; done

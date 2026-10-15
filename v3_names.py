@@ -1,4 +1,4 @@
-"""Shared name handling for Layer A (v4_run_ctx.py) and Layer B (v4_consolidate.py).
+"""Shared name handling for Layer A (v3_run_ctx.py) and Layer B (v3_consolidate.py).
 
 - NameGate: "what is this name?" -> PERSON / ORGANISATION / NOT_ENTITY from two models
   (spaCy NER, run on the sentence when there is one, and probablepeople Person vs Corporation),
@@ -25,7 +25,7 @@ PERSON, ORG, NOT = "PERSON", "ORGANISATION", "NOT_ENTITY"
 SPACY_LABELS = {"PERSON": PERSON, "ORG": ORG, "GPE": ORG, "NORP": ORG, "FAC": ORG}
 SPACY_COVER = 0.6   # an entity must cover this share of the name to count as a vote (choice; see README)
 # organisation-type word the parser tags at the END of a name ("Company", "Corp.") also removed when 2+ name words remain;
-# off by default (the spec removes CorporationLegalType parts only). Set from v4_rules.yaml organisations.legal_form_rule.
+# off by default (the spec removes CorporationLegalType parts only). Set from v3_rules.yaml organisations.legal_form_rule.
 TRAILING_ORG_TYPE_IS_LEGAL = False
 
 

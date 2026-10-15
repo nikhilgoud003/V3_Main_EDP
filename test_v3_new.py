@@ -2,8 +2,8 @@
 """Tests for the finish job: pending-judge scaling, name gate, organisation normalisation, office -> RELATED, export
 format, readers by structure, SIGUSR1 stack dump, safe saving, and no real names in code or config.
 
-Usage: python test_v4_new.py <new_test_folder>
-Layer B checks use V4_LB_MODEL (default models/model.joblib). All names below are made up.
+Usage: python test_v3_new.py <new_test_folder>
+Layer B checks use V3_LB_MODEL (default models/model.joblib). All names below are made up.
 """
 import json
 import os
@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 OUT = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else None
-MODEL = Path(os.environ.get("V4_LB_MODEL", str(HERE / "models/model.joblib"))).expanduser()
+MODEL = Path(os.environ.get("V3_LB_MODEL", str(HERE / "models/model.joblib"))).expanduser()
 PY = sys.executable
 results = []
 
@@ -30,7 +30,7 @@ SCALING = r'''
 import random, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[3])
-import v4_run_ctx as A
+import v3_run_ctx as A
 n, d = int(sys.argv[1]), Path(sys.argv[2])
 d.mkdir(parents=True, exist_ok=True)
 A.STORAGE_DIR = d
@@ -98,10 +98,10 @@ def synth_cases(folder):
 
 def main():
     if OUT is None or OUT.exists():
-        sys.exit("usage: test_v4_new.py <new folder that does not exist yet>")
+        sys.exit("usage: test_v3_new.py <new folder that does not exist yet>")
     OUT.mkdir(parents=True)
-    import v4_names as N
-    import v4_readers as R
+    import v3_names as N
+    import v3_readers as R
 
     # 1. scaling of the end-of-run pending-judge step
     times = scaling(OUT)
@@ -153,7 +153,7 @@ def main():
 
     # 4. Layer A on synthetic cases: judges must be PERSON, counsel organisations become offices, safe saving
     synth_cases(OUT / "in_a")
-    proc = subprocess.Popen([PY, str(HERE / "v4_run_ctx.py"), "--input", str(OUT / "in_a"), "--output", str(OUT / "out_a")],
+    proc = subprocess.Popen([PY, str(HERE / "v3_run_ctx.py"), "--input", str(OUT / "in_a"), "--output", str(OUT / "out_a")],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     lines = []
     for line in proc.stdout:                     # signal the run while it loads / runs the gate models
@@ -173,7 +173,7 @@ def main():
           and any("Quenby" in x for x in jn), f"judges {sorted(jn)}")
     firm_names = {m["raw_name"] for m in ments if m["entity_type"] == "firm"}
     counsel_names = {m["raw_name"] for m in ments if m["entity_type"] == "counsel"}
-    cfg_counsel = __import__("yaml").safe_load(open(HERE / "v4_rules.yaml"))["name_gate"]["counsel_organisation"]["value"]
+    cfg_counsel = __import__("yaml").safe_load(open(HERE / "v3_rules.yaml"))["name_gate"]["counsel_organisation"]["value"]
     want_firm = cfg_counsel == "firm"
     check(f"4c. counsel that is an ORGANISATION -> {'firm / office' if want_firm else 'stays counsel (setting)'}, not dropped",
           ("Quenby Legal Aid Society, Inc." in firm_names) == want_firm and ("Quenby Legal Aid Society, Inc." in counsel_names) != want_firm,
@@ -191,7 +191,7 @@ def main():
     if not MODEL.exists():
         check("5. Layer B model present", False, str(MODEL))
     else:
-        r = subprocess.run([PY, str(HERE / "v4_consolidate.py"), "--input", str(OUT / "out_a"), "--output", str(OUT / "out_b"),
+        r = subprocess.run([PY, str(HERE / "v3_consolidate.py"), "--input", str(OUT / "out_a"), "--output", str(OUT / "out_b"),
                             "--model", str(MODEL), "--export", str(OUT / "export")], capture_output=True, text=True)
         ok = r.returncode == 0
         if not ok:
@@ -234,8 +234,8 @@ def main():
     # 7. no real names in code or config (FJC judge names, court codes)
     import csv
     import re
-    code = "\n".join((HERE / f).read_text().lower() for f in ("v4_run_ctx.py", "v4_rules.yaml", "v4_names.py", "v4_readers.py",
-                                                            "v4_consolidate.py", "v4_consolidate.yaml"))
+    code = "\n".join((HERE / f).read_text().lower() for f in ("v3_run_ctx.py", "v3_rules.yaml", "v3_names.py", "v3_readers.py",
+                                                            "v3_consolidate.py", "v3_consolidate.yaml"))
     hits = []
     fjc = HERE / "data/judges_fjc.csv"
     courts = set()
@@ -244,12 +244,12 @@ def main():
             full = f"{r['First Name']} {r['Last Name']}".lower().strip()
             if len(full) > 5 and re.search(r"\b" + re.escape(full) + r"\b", code):
                 hits.append(full)
-    for p in sorted(Path(os.environ.get("V4_PILOT_DIR", "/nonexistent")).glob("*.json"))[:2000]:
+    for p in sorted(Path(os.environ.get("V3_PILOT_DIR", "/nonexistent")).glob("*.json"))[:2000]:
         courts.add(p.name.split("-")[0])
     words = set(re.findall(r"[a-z]+", code))
     hits += sorted(c for c in courts if c in words)
-    check("7. no real names in v4_run_ctx.py / v4_rules.yaml / v4_names.py / v4_readers.py / v4_consolidate.*",
-          not hits, f"{sorted(set(hits))[:10]}" + ("" if courts else " (court codes not checked: set V4_PILOT_DIR)"))
+    check("7. no real names in v3_run_ctx.py / v3_rules.yaml / v3_names.py / v3_readers.py / v3_consolidate.*",
+          not hits, f"{sorted(set(hits))[:10]}" + ("" if courts else " (court codes not checked: set V3_PILOT_DIR)"))
 
     print(f"\n{sum(results)}/{len(results)} checks passed")
     sys.exit(0 if all(results) else 1)

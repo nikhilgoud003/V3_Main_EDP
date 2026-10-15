@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Unit tests for v4_consolidate.py (Layer B) on small synthetic V4 output folders.
+"""Unit tests for v3_consolidate.py (Layer B) on small synthetic V3 output folders.
 
 Usage: python test_consolidate.py <new_test_folder>
-The model under test is a saved Layer B model trained on the pilot: set V4_LB_MODEL=<model.joblib>
-(default models/model.joblib next to this file). Test 7 also scans for the names in a V4 run folder when
-V4_LB_CHECK_RUN=<run folder> is set. Names below are made up for the tests.
+The model under test is a saved Layer B model trained on the pilot: set V3_LB_MODEL=<model.joblib>
+(default models/model.joblib next to this file). Test 7 also scans for the names in a V3 run folder when
+V3_LB_CHECK_RUN=<run folder> is set. Names below are made up for the tests.
 """
 import collections
 import json
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-MODEL = Path(os.environ.get("V4_LB_MODEL", str(HERE / "models/model.joblib"))).expanduser()
+MODEL = Path(os.environ.get("V3_LB_MODEL", str(HERE / "models/model.joblib"))).expanduser()
 OUT = Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else None
 results = []
 
@@ -27,7 +27,7 @@ def check(name, ok, detail=""):
 
 
 class Synth:
-    """Builds a V4 output folder (entities.jsonl, mentions.jsonl, state.json, ...) by hand."""
+    """Builds a V3 output folder (entities.jsonl, mentions.jsonl, state.json, ...) by hand."""
     PREFIX = {"judge": "SJ", "party": "SP", "counsel": "SC", "firm": "SF"}
 
     def __init__(self, court="zzd"):
@@ -117,7 +117,7 @@ def build_main():
 
 
 def run(inp, out):
-    r = subprocess.run([sys.executable, str(HERE / "v4_consolidate.py"), "--input", str(inp), "--output", str(out),
+    r = subprocess.run([sys.executable, str(HERE / "v3_consolidate.py"), "--input", str(inp), "--output", str(out),
                         "--model", str(MODEL)], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-2000:], r.stderr[-3000:])
@@ -136,12 +136,12 @@ def main():
     if OUT is None or OUT.exists():
         sys.exit("usage: test_consolidate.py <new folder that does not exist yet>")
     if not MODEL.exists():
-        sys.exit(f"model not found: {MODEL} (train one first: v4_consolidate.py --input <pilot run> --output <folder>)")
+        sys.exit(f"model not found: {MODEL} (train one first: v3_consolidate.py --input <pilot run> --output <folder>)")
     OUT.mkdir(parents=True)
     s, ids = build_main()
     inp = s.write(OUT / "in_main")
     ok = run(inp, OUT / "out_main")
-    check("0. Layer B runs on a synthetic V4 folder", ok)
+    check("0. Layer B runs on a synthetic V3 folder", ok)
     if not ok:
         return
     fin = final_ids(OUT / "out_main")
@@ -200,7 +200,7 @@ def main():
           all(v not in {r["old_id"] for r in redB} for v in finB.values()), f"{len(chains)} chained rows")
 
     # 7. grep: no real person / agency / court names in code or config
-    code = (HERE / "v4_consolidate.py").read_text().lower() + "\n" + (HERE / "v4_consolidate.yaml").read_text().lower()
+    code = (HERE / "v3_consolidate.py").read_text().lower() + "\n" + (HERE / "v3_consolidate.yaml").read_text().lower()
     words = set(re.findall(r"[a-z]+", code))
     hits = []
     fjc = HERE / "data/judges_fjc.csv"
@@ -210,8 +210,8 @@ def main():
             full = f"{r['First Name']} {r['Last Name']}".lower().strip()
             if len(full) > 5 and full in code:
                 hits.append(full)
-    run_dir = Path(os.environ.get("V4_LB_CHECK_RUN", "")).expanduser()
-    if os.environ.get("V4_LB_CHECK_RUN") and (run_dir / "entities.jsonl").exists():
+    run_dir = Path(os.environ.get("V3_LB_CHECK_RUN", "")).expanduser()
+    if os.environ.get("V3_LB_CHECK_RUN") and (run_dir / "entities.jsonl").exists():
         courts = set()
         for l in open(run_dir / "entities.jsonl"):
             e = json.loads(l)
@@ -220,7 +220,7 @@ def main():
             if len(n.split()) >= 2 and len(n) >= 12 and n in code:
                 hits.append(n)
         hits += sorted(c for c in courts if c in words)
-    check("7. no real names (FJC judges, run entities, court codes) in v4_consolidate.py / .yaml", not hits, f"{sorted(set(hits))[:10]}")
+    check("7. no real names (FJC judges, run entities, court codes) in v3_consolidate.py / .yaml", not hits, f"{sorted(set(hits))[:10]}")
     print(f"\n{sum(results)}/{len(results)} checks passed")
     sys.exit(0 if all(results) else 1)
 

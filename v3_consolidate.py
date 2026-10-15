@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Layer B: learned consolidation of a V4 (v4_run_ctx.py) output folder.
+"""Layer B: learned consolidation of a V3 (v3_run_ctx.py) output folder.
 
-Runs after v4_run_ctx.py and merges IDs that belong to the same real person or organisation. The decision comes from
+Runs after v3_run_ctx.py and merges IDs that belong to the same real person or organisation. The decision comes from
 a learned, calibrated pair scorer, not from hand-written matching rules:
 
   1. one entity card per ID (names, type, courts, divisions, cases, case years, titles, party sides, co-occurring
@@ -19,8 +19,8 @@ a learned, calibrated pair scorer, not from hand-written matching rules:
   9. --llm local|api (off by default): reviews queue pairs only after its precision is measured
 
 Usage:
-  python v4_consolidate.py --input <v4 output> --output <new folder> [--model <model.joblib>] [--llm local|api]
-                           [--cases <case json folder> ...] [--config v4_consolidate.yaml] [--key <answer key dir>]
+  python v3_consolidate.py --input <v3 output> --output <new folder> [--model <model.joblib>] [--llm local|api]
+                           [--cases <case json folder> ...] [--config v3_consolidate.yaml] [--key <answer key dir>]
 Without --model, a model is trained on --input (labels from the answer key, the FJC list and fragments) and saved
 as <output>/model.joblib. Running again on the same --output continues incrementally from consolidation_state.json.
 """
@@ -58,7 +58,7 @@ from sklearn.preprocessing import StandardScaler
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import v4_names as N  # noqa: E402  (shared organisation normalisation and display names)
+import v3_names as N  # noqa: E402  (shared organisation normalisation and display names)
 
 TYPES = ("judge", "party", "counsel", "firm")
 MODEL_VERSION = "layer-b-2"
@@ -93,7 +93,7 @@ FEATURES = [
     "comp_div",        # ... of those, in the same division as the shorter name's ID
     "is_judge", "is_party", "is_counsel", "is_firm",
     "is_person",
-    # organisations (0 for person pairs); names from v4_names.org_parts, the same normalisation as Layer A
+    # organisations (0 for person pairs); names from v3_names.org_parts, the same normalisation as Layer A
     "org_pair",           # both IDs are organisations
     "org_same_core",      # same normalised core name (legal forms removed)
     "org_same_loose",     # same core once the parser's organisation-type words are removed (Company, Corp., ...)
@@ -237,7 +237,7 @@ def case_parts(ucid, pivot):
 
 
 def layer_a_placeholder_re(cfg):
-    """Layer A's own placeholder rule (v4_rules.yaml doe_pattern + placeholder_party), read only. Layer A never merges
+    """Layer A's own placeholder rule (v3_rules.yaml doe_pattern + placeholder_party), read only. Layer A never merges
     such party names across cases; Layer B leaves those IDs alone so it never undoes that decision."""
     p = cfg_path(cfg, cfg["reference"]["layer_a_rules"])
     try:
@@ -256,7 +256,7 @@ def layer_a_placeholder_re(cfg):
 
 
 class World:
-    """Entity cards of one V4 output folder (plus optional synthetic fragment cards for training)."""
+    """Entity cards of one V3 output folder (plus optional synthetic fragment cards for training)."""
 
     def __init__(self, cfg, entities, mentions):
         self.cfg = cfg
@@ -1127,7 +1127,7 @@ def related_links(world, pair_list, probs, final_of, bundle):
 
 
 def display_of(world, entity_rows_by_id, members):
-    """canonical name of a final entity: the most complete variant over all member IDs (v4_names.display_name)."""
+    """canonical name of a final entity: the most complete variant over all member IDs (v3_names.display_name)."""
     raws, org = [], False
     for i in members:
         c = world.cards.get(i)
@@ -1322,7 +1322,7 @@ def write_model_card(path, bundle):
     th, info = bundle["thresholds"], bundle["train_info"]
     L = ["# Layer B model card", "",
          f"- Model kept: **{bundle['model_name']}** (isotonic-calibrated; the better held-out average precision of the two)",
-         f"- Trained on the V4 output folder `{bundle['trained_on']}`; version `{bundle['version']}`",
+         f"- Trained on the V3 output folder `{bundle['trained_on']}`; version `{bundle['version']}`",
          f"- Candidate filter (speed only): same type AND (share a case OR same court with char n-gram TF-IDF cosine >= "
          f"{bundle['candidate_cut']:.4f}). The cut is the {100 * info['positive_quantile']:g}th percentile of the cosine over labelled same-court positive pairs. "
          f"The filter keeps {info['filter_recall_labelled'][0]} of {info['filter_recall_labelled'][1]} labelled real same-court positive pairs.",
@@ -1357,7 +1357,7 @@ def write_model_card(path, bundle):
           "| feature | LR weight | HGB importance (AP drop) |", "|---|---|---|"]
     for f in FEATURES:
         L.append(f"| {f} | {bundle['lr_coefficients'][f]:+.3f} | {bundle['hgb_importances'][f]:.4f} |")
-    L += ["", "Feature meanings are in the FEATURES list at the top of v4_consolidate.py.", "",
+    L += ["", "Feature meanings are in the FEATURES list at the top of v3_consolidate.py.", "",
           "## Fixed constraints (the only hand rules)", "",
           "1. never mix entity types; 2. never put two different FJC judges in one ID; 3. never put two different full first "
           "names with the same surname in one ID; 4. never merge organisations listed as separate parties in one case. "
@@ -1380,13 +1380,13 @@ def write_model_card(path, bundle):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--input", required=True, help="V4 output folder (v4_run_ctx.py)")
+    ap.add_argument("--input", required=True, help="V3 output folder (v3_run_ctx.py)")
     ap.add_argument("--output", required=True, help="Layer B output folder (new, or an earlier Layer B output to continue)")
     ap.add_argument("--model", help="saved model.joblib; without it a model is trained on --input")
     ap.add_argument("--llm", choices=["local", "api"], help="review queue pairs with an LLM (off by default)")
     ap.add_argument("--cases", action="append", default=[], help="case JSON folder(s), for LLM docket snippets")
-    ap.add_argument("--config", default=str(HERE / "v4_consolidate.yaml"))
-    ap.add_argument("--key", help="answer key folder for training/evaluation (default: $V4_ANSWER_KEY, then config reference.answer_key_dir)")
+    ap.add_argument("--config", default=str(HERE / "v3_consolidate.yaml"))
+    ap.add_argument("--key", help="answer key folder for training/evaluation (default: $V3_ANSWER_KEY, then config reference.answer_key_dir)")
     ap.add_argument("--export", help="also write the final result as exactly two files (entities.jsonl, mentions.jsonl) here")
     a = ap.parse_args()
     t0 = time.time()
@@ -1404,7 +1404,7 @@ def main():
     mentions = read_jsonl(inp / "mentions.jsonl")
     uncertain = read_jsonl(inp / "uncertain_pairs.jsonl")
     pending = read_jsonl(inp / "pending_judges.jsonl")
-    kd = a.key or os.environ.get("V4_ANSWER_KEY") or cfg["reference"]["answer_key_dir"]
+    kd = a.key or os.environ.get("V3_ANSWER_KEY") or cfg["reference"]["answer_key_dir"]
     key_dir = Path(os.path.expanduser(kd)) if kd else None
     if key_dir is not None and not (key_dir / "answer_key_detail.csv").exists():
         log(f"answer key not found in {key_dir}: training without it")

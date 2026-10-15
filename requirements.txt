@@ -15,3 +15,5 @@ gliner2==2.1.0
 torch==2.14.1
 transformers==5.19.0
 tokenizers==0.23.3
+# knowledge graph (v4_kg.py): output validation; the Tentris server itself is a separate binary
+rdflib==7.6.0

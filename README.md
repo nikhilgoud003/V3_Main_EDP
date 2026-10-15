@@ -160,6 +160,58 @@ PYTHON=$(which python) ./v4_consolidate_run.sh /path/to/test_folder
 - `score.py` scores a run against the answer key: `python score.py --key /path/to/answer_key --v4dir V4=/path/to/run`.
 - The answer key and the case files are not included.
 
+## Knowledge graph (Tentris)
+
+`v4_kg.py` writes the V4 result as RDF and loads it into a Tentris store.
+
+**Inputs:** the `--export` folder (entities.jsonl, mentions.jsonl) and the Layer B output folder (redirects.jsonl, related_links.jsonl) of the same run.
+
+**Vocabulary.** It follows the SCALES PACER terms V3 used:
+
+| What | Terms |
+|---|---|
+| Namespaces | `pacer:` = `http://scales-kg.org/pacer#`; ids `http://scales-kg.org/id/<kind>/<id>` |
+| Entities | `pacer:Judge`, `pacer:Party`, `pacer:LawFirm` |
+| Mentions | `pacer:JudgeMention` / `PartyMention` / `FirmMention` |
+| Cases | `pacer:Case` |
+| Names | `pacer:hasName`, `skos:prefLabel` / `altLabel` |
+| IDs | `pacer:hasSJID` / `hasSPID` / `hasSFID` |
+| Courts | `pacer:hasCode` |
+| Links | `pacer:mentionsIn`, `pacer:resolvedTo`, `pacer:hasRole`, `pacer:hasCounselOffice` |
+
+Terms V4 adds are in `v4:` (`http://scales-kg.org/v4#`):
+- `v4:Attorney` / `v4:AttorneyMention` / `v4:hasSCID` (counsel);
+- `v4:mergedInto` (Layer B merge, old ID -> surviving ID);
+- `v4:officeLink` / `v4:parentOrSubsidiaryLink`;
+- `v4:plaintiffParty` / `v4:defendantParty` / `v4:otherParty` (side per case);
+- `v4:hasJudge`, `v4:hasAttorney`, `v4:represents`;
+- `v4:isOrganisation`;
+- side counts.
+
+**Validation** runs before every load: the output parses, every entity has a type and a name, and no link points to an untyped node.
+
+**Loads.**
+- **`build`** loads a new, empty store with `tentris load`, then serves it.
+- **`add`** compares the new export's triples with the last loaded state (`state_loaded.nt` in the store folder). It applies only the difference to the live store: SPARQL `DELETE DATA` for removed triples (e.g. a changed display name, a merged-away ID), then `INSERT DATA` for new ones. Reloading the same batch adds nothing.
+- **The load log:** every load is recorded in `load_log.jsonl` next to the store folder (batch id, time, triples inserted / removed, total).
+
+**Server.** The store is served on 127.0.0.1 only, on a free port chosen at start (never 9080), recorded in `<store>/.tentris_port`. No server address is stored in the repo.
+
+**Tentris binary.** Tentris 1.1.0, at `~/.local/bin/tentris` or set `TENTRIS_BIN`. The bundled community license is used; an expired `~/.config/tentris-license.toml` would take precedence, so remove it if present.
+
+```bash
+python v4_kg.py start  --store /path/to/kg/store [--port N]
+python v4_kg.py stop   --store /path/to/kg/store
+python v4_kg.py emit   --export /path/to/export --layer-b /path/to/consolidated --out graph.nt
+python v4_kg.py build  --export /path/to/export --layer-b /path/to/consolidated --store /path/to/kg/store --batch-id first
+python v4_kg.py add    --export /path/to/export --layer-b /path/to/consolidated --store /path/to/kg/store --batch-id next
+python v4_kg.py counts --export /path/to/export --store /path/to/kg/store
+python v4_kg.py query  --store /path/to/kg/store [--example 1..5 | --sparql "SELECT ..."]
+python v4_kg.py prove  --export-1 E1 --layer-b-1 B1 --export-2 E2 --layer-b-2 B2 --work /path/to/kg
+```
+
+**Layer B snapshots.** Layer B rewrites `related_links.jsonl` on every run, so keep a copy of the Layer B folder per stage (as `prove` expects) when you want to rebuild an earlier stage.
+
 ## Lists that remain, and why
 
 The gate replaced the keyword lists that decided what is a name: organisation words, docket non-judge keywords, judge non-name words, court-staff phrases for names, the GLiNER2 type stage, and legal-form / abbreviation lists. The removed lists and the reasons are listed in `v4_rules.yaml` under `removed_unused`.

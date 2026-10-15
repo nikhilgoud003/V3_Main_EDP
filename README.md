@@ -1,4 +1,39 @@
-# V4: entity resolution for court records
+# V3_Main_EDP: entity resolution for court records
+
+> This repository holds the pipeline developed as V4 (Layer A, Layer B, document reader, Tentris knowledge graph). The older V3 pipeline is at https://github.com/nikhilgoud003/V3_overtime.
+
+**About the name.** The repository is called V3_Main_EDP, but the code inside is the V4 pipeline, so it keeps V4 names:
+- the scripts are `v4_*.py`;
+- the knowledge-graph namespace is `v4:` (`http://scales-kg.org/v4#`).
+
+These names are part of the saved outputs and the graph IRIs, so they were not renamed.
+
+**Contents:**
+
+| Path | What it is |
+|---|---|
+| `v4_run_ctx.py`, `v4_rules.yaml` | Layer A: incremental linking, and its rules |
+| `v4_consolidate.py`, `v4_consolidate.yaml`, `models/` | Layer B: learned consolidation, its settings, and the trained model with its model card |
+| `v4_names.py` | name gate, organisation normalisation, display names (shared) |
+| `v4_readers.py` | input readers: docket JSON, OCR documents, generic JSON |
+| `v4_kg.py` | RDF emitter and Tentris loader (knowledge graph) |
+| `data/` | public reference data: FJC judge list, Census name files (see `data/README.md`) |
+| `test_ctx.py`, `test_consolidate.py`, `test_v4_new.py` | tests for Layer A, Layer B and the later V4 changes |
+| `v4_test_run.sh`, `v4_consolidate_run.sh` | full test procedures |
+| `score.py`, `check_consolidated.py`, `doc_report.py` | scoring against the answer key, Layer B checks, document summary |
+
+**Quick start** (details in the sections below):
+
+```bash
+source .venv/bin/activate
+python v4_run_ctx.py --input /path/to/case_json --output /path/to/run                      # Layer A
+python v4_consolidate.py --input /path/to/run --output /path/to/consolidated \
+  --model models/model.joblib --export /path/to/export                                    # Layer B + export
+python v4_kg.py build --export /path/to/export --layer-b /path/to/consolidated \
+  --store /path/to/kg/store --batch-id first                                              # knowledge graph
+```
+
+## What V4 does
 
 V4 reads court case files and gives stable IDs to the **judges, parties, counsel and firms** named in them. It has two layers.
 
@@ -148,7 +183,7 @@ V4_PILOT_DIR=/path/to/pilot_json python test_ctx.py tests_a
 # Layer B (13 checks, synthetic data, uses models/model.joblib unless V4_LB_MODEL is set)
 python test_consolidate.py tests_b
 
-# this release (20 checks): pending-judge scaling (1k / 10k / 50k names), name gate, &/and and office field,
+# later V4 changes (22 checks): pending-judge scaling (1k / 10k / 50k names), name gate, &/and and office field,
 # office -> RELATED, export format, readers by structure, kill -USR1, safe saving, no real names in code or config
 V4_PILOT_DIR=/path/to/pilot_json python test_v4_new.py tests_new
 

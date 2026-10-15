@@ -349,12 +349,58 @@ documents:
     plaintiff: "name of a plaintiff, petitioner or applicant party in the case"
     defendant: "name of a defendant or respondent party in the case"
     party: "name of another party in the case"
-    attorney: "name of a lawyer or attorney"
+    attorney: "name of a lawyer or attorney (signing, appearing, or being served)"
+    address: "street or postal address"
+    bar number: "attorney bar or registration number"
     law firm: "name of a law firm, legal office or government legal office"
     email: "email address"
     phone: "telephone number"
+    mentioned: "organisation or person only mentioned in the text, not a participant in this case"
   label_types: {judge: judge, plaintiff: party, defendant: party, party: party, attorney: counsel, "law firm": firm}
   label_sides: {plaintiff: plaintiff-side, defendant: defendant-side, party: other}
+  contact_labels: [email, phone, address, bar number]
+  contact_min_confidence: 0.4   # choice: contact details only add evidence, so the model's own threshold range is enough
+  template:
+    source: 'user (document fixes, item 1) - the form template is learned from the data: a line whose normalised text (lower
+      case, digits as #) is similar to a line in min_documents or more documents, and is not itself a confidently found name,
+      is a template label. line_similarity absorbs OCR noise (rapidfuzz ratio; data - on the test files, OCR readings of the same
+      label score 0.84-0.95 against each other). A label is paired with the nearest non-template line
+      in its block (max_pair_lines), else the nearest line of a horizontally overlapping block on the same page
+      (max_pair_gap_px, page pixels). The lines a document reader has seen are kept in document_model_cache.jsonl, so
+      later runs learn from every document.'
+    min_documents: 2
+    line_similarity: 0.84
+    label_max_words: 10        # a template line with more words, or ending in a period, is boilerplate prose, never a
+                               # field label (choice)
+    label_min_confidence: 0.5  # the model reading a label's role ("Printed name of party ..." -> party 0.59)
+    ngram_share: 0.6           # or: this share of the line's words sits in word 3-grams found in min_documents documents
+                               # (catches a label with OCR junk appended; choice)
+    prose_min_other_words: 6   # a name with more than this many other words on its line is inside prose (mentioned only),
+                               # unless a form label points to it (choice: a signature line "Honorable <name>, U.S. District
+                               # Court Judge" has 5; narrative sentences have 8+)
+    prose_block_words: 8       # a block whose lines average this many words is prose: its names are mentions unless a form
+                               # label points to them (choice: caption / signature / address blocks average 2-5)
+    max_pair_lines: 3
+    max_pair_gap_px: 100
+  field_labels:
+    source: 'user (document fixes, items 1-2) - the meaning of a template label is decided by the zero-shot model (GLiNER2
+      classification) from these descriptions; no label phrases are listed anywhere'
+    "a form label for the name of a party (plaintiff, defendant, petitioner, the party signing or waiving)": party
+    "a form label for the name or signature of a lawyer or attorney": counsel
+    "a form label for the name or signature of a judge": judge
+    "a form label for something else (a date, number, address, title, instruction or heading)": other
+  one_role:
+    source: 'user (document fixes, item 3) - one role per name per case: evidence from every document of the case is added
+      (the model''s label confidences for the name, the paired form label''s meaning label_weight, contact details next to the
+      only person of a block contact_bonus); the top role must hold min_share of the evidence, else the name goes to
+      document_review.jsonl (choice: 0.7 = a clear majority).'
+    label_weight: 1.5
+    person_party_label_weight: 0.5   # the model's plaintiff / defendant / party label for a PERSON name counts half: on
+                                     # the test documents it gave those labels to judges and lawyers as well
+    contact_bonus: 0.5               # bar number / email / phone / address in the block of at most contact_max_people persons
+    contact_max_people: 3
+    firm_bonus: 0.5                  # a person in the same block as a law firm
+    min_share: 0.7
 
 # ---------------------------------------------------------------- party roles (clean-up job)
 party_roles:

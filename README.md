@@ -76,11 +76,21 @@ python v4_consolidate.py --input /path/to/run --output /path/to/new_model_run --
 | OCR document: `filename` + `pages[].blocks[]` with `class`, `confidence`, `bbox`, `text` (e.g. YOLO output) | the document reader |
 | Any other JSON | the generic reader: every text field, with its JSON path |
 
-Document and generic readers:
-- **Name finding.** GLiNER2 finds the names, using label descriptions in `v4_rules.yaml` (`documents`). Every name then passes through the name gate. Undecided names are reviewed, not created.
-- **Case ID and court** come from the file name and the text, cross-checked.
-- **Kept with each mention:** page, bbox and confidence.
-- **Low confidence:** the name goes to `document_review.jsonl`.
+Document and generic readers. All document / generic files of a run are read together, after the dockets, using only models, layout and statistics from the data (no phrase lists, no form-specific rules):
+
+1. **Template learning.** A line repeated (fuzzily, for OCR noise) in documents of two or more cases, or in two or more documents of one case without a name filling it, is form text. Form text never gives a role by itself. Each short template line (a label) is paired, by bbox, with the nearest line holding a name. The label's meaning (party / lawyer / judge / other field) comes from GLiNER2: the extraction model reading the label text, or the zero-shot classifier when the label names several roles.
+2. **Participant vs mentioned.** A name that fills its line in a non-prose block (a value line), or that a form label points to, fills a participant slot. Names inside prose go to `mentioned_only.jsonl`, not to entities. The model also has an explicit "only mentioned in the text" class.
+3. **One role per name per case.** The role is chosen from the evidence of every document of the case:
+   - the paired label's meaning;
+   - GLiNER2 name labels (a second pass on the value line alone adds judge / attorney evidence; the model's plaintiff / defendant guesses for person names count half);
+   - a bar number / email / phone / address next to the only persons of a block;
+   - a law firm in the same block.
+
+   A weak majority (under 70%) goes to `document_review.jsonl`.
+4. **Firm vs company.** An organisation is a firm only when attached to a lawyer (same block, or a shared email domain). Otherwise it is a party (when a party slot holds it) or only mentioned.
+5. **Docket first.** When docket JSON of the same case is in this run or the output folder, its structured roles override document guesses for the same name.
+
+Every name then passes through the name gate; undecided document names are reviewed, not created. Case ID and court come from the file name and the text, cross-checked. Page, bbox and confidence are kept with each mention; low-confidence names go to `document_review.jsonl`. The settings, each with a source note, are in `v4_rules.yaml` under `documents`. `python doc_report.py <layer A output> --names` prints, per document, the entities by type, the mentioned-only names and the review rows.
 
 **While it runs:**
 - Layer A prints `Progress:` / `Reading:` / `Name gate:` / `End step:` lines.
@@ -100,7 +110,8 @@ Document and generic readers:
 | `dropped_entities.jsonl` | every drop, with the gate votes where the gate decided |
 | `gate_review.jsonl` | names the gate could not decide |
 | `name_gate_cache.jsonl` | model votes per distinct string |
-| `document_review.jsonl` | document rows to check |
+| `document_review.jsonl` | document rows to check (low confidence, case-number mismatch, conflicting roles) |
+| `mentioned_only.jsonl` | names found only inside document text, not filling a participant slot (written when there are any) |
 | `document_model_cache.jsonl` | document model results |
 
 **Layer B output files:**
@@ -179,6 +190,11 @@ What remains:
   - the GLiNER2 label descriptions.
 
 ## Known limitations
+
+- **Document reader (OCR) limits** seen on the 7 test files:
+  - Persons in a certificate-of-service list with no form label may be split between counsel and party and go to review: GLiNER2 labels most bare person names plaintiff / defendant.
+  - A party name repeated in captions of many cases (e.g. the federal government in criminal judgments) is treated as form text.
+  - OCR debris next to a form label can still become a name.
 
 - **The LLM is off by default.** The Layer B `--llm` precision check needs labelled pilot pairs. Those contain party names and were removed from `models/model.joblib`, so Layer B LLM answers are notes only.
 - **Firms and organisation parties never auto-merge in Layer B.** On the pilot answer key, no organisation evidence group reached 0.98 held-out precision: the key has few organisation positives, and it splits spelling variants. Such pairs become RELATED links or review items.

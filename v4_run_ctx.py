@@ -199,6 +199,7 @@ GATE_CACHE_FILE = None
 GATE_REVIEW_FILE = None
 DOC_CACHE_FILE = None
 DOC_REVIEW_FILE = None
+MENTIONED_FILE = None
 QUIET_UNCERTAIN = False   # set while re-checking pending judges, so uncertain pairs are not logged twice
 GATE = None        # v4_names.NameGate, created in main()
 EXTRACTOR = None   # v4_readers.Extractor, created on the first document / generic file
@@ -222,6 +223,7 @@ class MemoryManager:
         self.pending = []     # docket / one-word judge mentions waiting to join or create a judge
         self.gate_review = []  # names the gate could not decide (no agreement, no known entity, no LLM)
         self.doc_review = []   # document / generic reader rows to check (low confidence, case number mismatch)
+        self.mentioned_only = []  # names found only in narrative / instruction text of documents (not entities)
         self.load()
 
     def load(self):
@@ -249,7 +251,7 @@ class MemoryManager:
         if PENDING_FILE.exists():
             with open(PENDING_FILE, "r", encoding="utf-8") as f:
                 self.pending = [json.loads(l) for l in f if l.strip()]
-        for attr, fp in (("gate_review", GATE_REVIEW_FILE), ("doc_review", DOC_REVIEW_FILE)):
+        for attr, fp in (("gate_review", GATE_REVIEW_FILE), ("doc_review", DOC_REVIEW_FILE), ("mentioned_only", MENTIONED_FILE)):
             if fp.exists():
                 with open(fp, "r", encoding="utf-8") as f:
                     setattr(self, attr, [json.loads(l) for l in f if l.strip()])
@@ -274,6 +276,9 @@ class MemoryManager:
                                 ("document review", DOC_REVIEW_FILE, self.doc_review)):
             N.atomic_write_lines(fp, rows)
             print(f"End step: saved {label} ({fp.name}) | {time.perf_counter() - t0:.1f}s", flush=True)
+        if self.mentioned_only or MENTIONED_FILE.exists():
+            N.atomic_write_lines(MENTIONED_FILE, self.mentioned_only)
+            print(f"End step: saved mentioned only ({MENTIONED_FILE.name}) | {time.perf_counter() - t0:.1f}s", flush=True)
         if GATE is not None:
             GATE.save()
         if EXTRACTOR is not None:
@@ -1145,11 +1150,13 @@ def gate_known(r, votes, file_judges=()):
     if t == "party":
         for eid in INDEX.by_key.get(("party", clean), []):
             return (N.ORG if True in INDEX.ctx[eid]["is_org"] else N.PERSON), "matches a known party"
-        return None
     if t == "firm":
         if INDEX.by_key.get(("firm", clean, N.org_parts(r["raw_name"])["office"])):
             return N.ORG, "matches a known firm / office"
-        return None
+    rk = (r["_ctx"].get("reader_kind") or [None])[0]
+    if rk in (N.PERSON, N.ORG) and rk in votes:
+        # a document name: the reader's person / organisation decision (model label + relations) settles a split vote
+        return rk, "document reader (model label + relations)"
     return None
 
 
@@ -1377,19 +1384,50 @@ def finish_records(extracted, ucid, court, drops):
     return records, drops
 
 
-def extract_text_file(data, filename, kind):
-    """Document (OCR pages / blocks) or generic JSON: names found by the model, then the same records as dockets."""
+def doc_kind_of(name, label):
+    """PERSON / ORGANISATION for a name found in a document: the name gate's two votes; when they differ, the model's
+    own label (judge / attorney -> person, law firm -> organisation), else the probablepeople vote."""
+    k = N.NameGate.key(name)
+    if k not in GATE.cache:
+        GATE.vote({k: (name, None, None)})
+    s_, p_ = GATE.votes_of(name)
+    if s_ == p_ and s_ in (N.PERSON, N.ORG):
+        return s_
+    hint = {"judge": N.PERSON, "attorney": N.PERSON, "law firm": N.ORG}.get(label)
+    return hint or (p_ if p_ in (N.PERSON, N.ORG) else None)
+
+
+def read_documents(docs, docket_recs):
+    """All document / generic files of the run together (template learning and one role per name per case need every
+    document); docket roles of the same case (this run's dockets and saved docket mentions) override document guesses."""
     global EXTRACTOR
     if EXTRACTOR is None:
         EXTRACTOR = READERS.Extractor(DOC_CFG, DOC_CACHE_FILE, DOC_MODEL, LLM_CFG)
-    ucid, court, extracted, reviews = READERS.read_text_file(data, filename, kind, EXTRACTOR, DOC_CFG)
-    memory.doc_review.extend(reviews)
-    records, drops = finish_records(extracted, ucid, court, [])
-    party_names = sorted({r["clean_name"] for r in records if r["entity_type"] == "party"})
-    for r in records:
-        if r["entity_type"] == "party":
-            r["_ctx"]["coparties"] = [p for p in party_names if p != r["clean_name"]]
-    return records, drops
+    ucids = set()
+    for fname, data, kind in docs:
+        fc, fcase = READERS.case_from_filename(fname)
+        if fc and fcase:
+            ucids.add(f"{fc};;{fcase}")
+    roles = defaultdict(dict)
+    key = lambda n: READERS.norm_line(n).replace("#", "")
+    for r in docket_recs:
+        if r["ucid"] in ucids:
+            roles[r["ucid"]].setdefault(key(r["raw_name"]), r["entity_type"])
+    for m in memory.mentions.values():
+        if m["ucid"] in ucids and not (m.get("context") or {}).get("document"):
+            roles[m["ucid"]].setdefault(key(m["raw_name"]), m["entity_type"])
+    res, mentioned = READERS.read_text_files(docs, EXTRACTOR, DOC_CFG, doc_kind_of, roles)
+    memory.mentioned_only.extend(mentioned)
+    out = {}
+    for fname, (ucid, court, extracted, reviews) in res.items():
+        memory.doc_review.extend(reviews)
+        records, drops = finish_records(extracted, ucid, court, [])
+        party_names = sorted({r["clean_name"] for r in records if r["entity_type"] == "party"})
+        for r in records:
+            if r["entity_type"] == "party":
+                r["_ctx"]["coparties"] = [p for p in party_names if p != r["clean_name"]]
+        out[fname] = (records, drops)
+    return out
 
 
 def extract_any(content, filename):
@@ -1402,9 +1440,8 @@ def extract_any(content, filename):
     kind = READERS.file_kind(data)
     if kind == "docket":
         recs, drops = extract_mentions_from_json(content, filename)
-    else:
-        recs, drops = extract_text_file(data, filename, kind)
-    return recs, drops, kind
+        return recs, drops, kind
+    return data, None, kind      # documents / generic JSON are read together after the dockets (read_documents)
 
 
 def ingest_json_files(files_dict):
@@ -1437,6 +1474,7 @@ def ingest_json_files(files_dict):
 
     # Pass 1: extract every new file once, so party-name counts ("rare name") cover the whole batch.
     todo = []
+    deferred = []   # documents / generic JSON, read after the dockets
     for fname, content in files_dict.items():
         checksum = hashlib.sha256(content).hexdigest()
         if fname in memory.state["processed_files"] and memory.state["processed_files"][fname] == checksum:
@@ -1444,6 +1482,10 @@ def ingest_json_files(files_dict):
             continue
         recs, drops, kind = extract_any(content.decode("utf-8", errors="replace"), fname)
         stats[f"files read as {kind}"] = stats.get(f"files read as {kind}", 0) + 1
+        if kind in ("document", "generic"):
+            deferred.append((len(todo), fname, recs, kind))
+            todo.append((fname, checksum, [], []))
+            continue
         for r in recs:
             if r["entity_type"] == "counsel":
                 INDEX.counsel_name_cases[counsel_core(r["clean_name"])].add(r["ucid"])
@@ -1454,6 +1496,23 @@ def ingest_json_files(files_dict):
         todo.append((fname, checksum, recs, drops))
         if len(todo) % PROGRESS_EVERY == 0:
             print(f"Reading: {len(todo)}/{total} files | {time.perf_counter() - t_start:.1f}s", flush=True)
+
+    if deferred:
+        t_d = time.perf_counter()
+        print(f"Documents: reading {len(deferred)} document / generic file(s) together", flush=True)
+        dock = [r for _, _, recs_, _ in todo if recs_ for r in recs_]
+        got = read_documents([(fname, data, kind) for _, fname, data, kind in deferred], dock)
+        for pos, fname, _, _ in deferred:
+            recs, drops = got.get(fname, ([], []))
+            for r in recs:
+                if r["entity_type"] == "counsel":
+                    INDEX.counsel_name_cases[counsel_core(r["clean_name"])].add(r["ucid"])
+                if r["entity_type"] == "party":
+                    INDEX.add_party_name_case(r["clean_name"], r["ucid"])
+                elif r["entity_type"] == "judge":
+                    INDEX.add_judge_first(r["clean_name"], r["court"])
+            todo[pos] = (todo[pos][0], todo[pos][1], recs, drops)
+        print(f"Documents: done | {time.perf_counter() - t_d:.1f}s", flush=True)
 
     # Name gate: two model votes per DISTINCT string (cached across runs), then party initials for the acronym rule
     items = {}
@@ -1700,7 +1759,7 @@ def collect_inputs(paths):
 
 def main():
     global STORAGE_DIR, ENTITIES_FILE, MENTIONS_FILE, STATE_FILE, UNCERTAIN_FILE, DROPPED_FILE, PENDING_FILE
-    global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, GATE, DOC_MODEL, LLM_CFG, memory
+    global GATE_CACHE_FILE, GATE_REVIEW_FILE, DOC_CACHE_FILE, DOC_REVIEW_FILE, MENTIONED_FILE, GATE, DOC_MODEL, LLM_CFG, memory
     faulthandler.register(signal.SIGUSR1, all_threads=True)   # `kill -USR1 <pid>` prints where the run is
     ap = argparse.ArgumentParser(description="V4 incremental entity resolution, context-aware matching (local)")
     ap.add_argument("--input", nargs="+", required=True, help=".json file(s), folder(s) of .json files, or .zip")
@@ -1729,6 +1788,7 @@ def main():
     GATE_REVIEW_FILE = STORAGE_DIR / "gate_review.jsonl"
     DOC_CACHE_FILE = STORAGE_DIR / "document_model_cache.jsonl"
     DOC_REVIEW_FILE = STORAGE_DIR / "document_review.jsonl"
+    MENTIONED_FILE = STORAGE_DIR / "mentioned_only.jsonl"
     DOC_MODEL = args.doc_model
     if args.llm == "local" or args.doc_model == "ollama":
         oc = GATE_CFG["ollama"]
